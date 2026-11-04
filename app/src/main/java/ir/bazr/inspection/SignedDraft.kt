@@ -8,7 +8,7 @@ import java.time.Instant
 /** Encrypted by SecureStore. A signature becomes invalid if the report body changes. */
 class SignedDraft(private val store: SecureStore) {
     private fun checksum(d: InspectionDraft): String = MessageDigest.getInstance("SHA-256")
-        .digest(listOf(d.key, d.submissionKey, d.startedAt, d.answers.toString(), d.notes.toString(), d.attachments.toString()).joinToString("\u001f").toByteArray(Charsets.UTF_8))
+        .digest(listOf(d.key, d.submissionKey, d.startedAt, d.answers.toString(), d.notes.toString(), d.attachments.toString(), d.acknowledgedIds().toString(), d.acknowledgedAt).joinToString("\u001f").toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     fun save(d: InspectionDraft, png: ByteArray) {

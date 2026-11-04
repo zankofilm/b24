@@ -994,12 +994,12 @@ class MainActivity : AppCompatActivity() {
                     if (available.isNotEmpty()) showMission(available.first())
                     else showHome("missions")
                 }
-                if (queued.isNotEmpty()) {
-                    val batch = makeButton("ارسال همه پیش‌نویس‌های آماده (${queued.size})", false) { sendAllQueued() }
-                    batch.setIconResource(R.drawable.ic_send_all)
-                    content.addView(batch)
-                    secondaryButton("نمایش صف ارسال و خطاها") { showOutbox() }
+                val batch = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", false) {
+                    if (queued.isEmpty()) showHome("drafts") else sendAllQueued()
                 }
+                batch.setIconResource(R.drawable.ic_send_all)
+                content.addView(batch)
+                if (queued.isNotEmpty()) secondaryButton("نمایش صف ارسال و خطاها") { showOutbox() }
                 val official = makeButton("گزارش رسمی | دریافت PDF", false) { showOfficialReports() }
                 official.setIconResource(R.drawable.ic_official_report)
                 content.addView(official)
@@ -1106,16 +1106,27 @@ class MainActivity : AppCompatActivity() {
             "drafts" -> {
                 screen("پیش‌نویس‌های من", "کارهای ذخیره‌شده روی همین دستگاه",withNav=true)
                 label("${drafted.size} پیش‌نویس موجود",18,true,navy)
-                if (queued.isNotEmpty()) {
-                    gap(6)
-                    val ready = makeButton("ارسال گروهی ${queued.size} گزارش آماده", true) { sendAllQueued() }
-                    ready.setIconResource(R.drawable.ic_send_all)
-                    content.addView(ready)
-                    secondaryButton("مشاهده صف ارسال") { showOutbox() }
-                }
+                gap(6)
+                val ready = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", true) { sendAllQueued() }
+                ready.setIconResource(R.drawable.ic_send_all)
+                content.addView(ready)
+                secondaryButton("نمایش صف ارسال و جزئیات خطاها") { showOutbox() }
                 gap(10)
                 if (drafted.isEmpty()) emptyState("پیش‌نویسی ندارید","هنگام پاسخ به چک‌لیست، اطلاعات به‌صورت خودکار ذخیره می‌شود.")
-                else drafted.forEach { missionItem(it) }
+                else drafted.forEach { mission ->
+                    val key = missionKey(mission)
+                    val pending = outbox.get(key)
+                    val draft = InspectionDraft(key, store)
+                    val status = when {
+                        pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
+                        pending != null -> "امضاشده · آماده ارسال"
+                        draft.validate(mission).isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
+                        draft.unscoredIds(mission).isNotEmpty() -> "پیش‌نویس با ${draft.unscoredIds(mission).size} بند بی‌امتیاز"
+                        else -> "آماده مرور و امضا"
+                    }
+                    label("وضعیت: $status", 12, false, if (pending != null) teal else muted)
+                    missionItem(mission)
+                }
                 gap(12)
                 label("برای جلوگیری از حذف اطلاعات، داده‌های برنامه را از تنظیمات گوشی پاک نکنید.",12,false,muted)
             }
@@ -1237,7 +1248,9 @@ class MainActivity : AppCompatActivity() {
         score.addTextChangedListener(object: TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                draft.answers.put(id,s?.toString() ?: ""); draft.save(); refreshProgress()
+                draft.answers.put(id,s?.toString() ?: "")
+                draft.clearAcknowledgement()
+                draft.save(); refreshProgress()
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -1297,7 +1310,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(nav)
         if (currentQuestionIndex == count - 1 && validAnswers < count) {
             gap(9)
-            secondaryButton("بازگشت به اولین سؤال تکمیل‌نشده") {
+            secondaryButton("رفتن به اولین بند بدون امتیاز (اختیاری)") {
                 val firstMissing = (0 until count).firstOrNull { idx ->
                     val questionId = questions.optJSONObject(idx)?.optString("id") ?: ""
                     val value = draft.answers.optString(questionId).toDoubleOrNull()
@@ -1310,9 +1323,9 @@ class MainActivity : AppCompatActivity() {
         gap(15)
         secondaryButton("ذخیره پیش‌نویس") { draft.save(); notifyShort("پیش‌نویس روی دستگاه ذخیره شد") }
         label("پاسخ‌ها هنگام تایپ به‌صورت خودکار و رمزنگاری‌شده ذخیره می‌شوند.",12,false,muted)
-        if (enabled && currentQuestionIndex == count-1) {
+        if (enabled) {
             gap(8)
-            button("مرور گزارش نهایی") { showReportReview(mission, draft) }
+            button("پایان بازرسی و مرور گزارش") { showReportReview(mission, draft) }
             label("ارسال نهایی تنها با اتصال اینترنت انجام می‌شود.",12,false,muted)
         }
     }
@@ -1321,7 +1334,7 @@ class MainActivity : AppCompatActivity() {
     private fun showReportReview(mission: JSONObject, draft: InspectionDraft) {
         val issues = draft.validate(mission)
         if (issues.isNotEmpty()) {
-            AlertDialog.Builder(this).setTitle("گزارش نیازمند تکمیل است")
+            AlertDialog.Builder(this).setTitle("موارد امتیازدار نیازمند اصلاح هستند")
                 .setMessage(issues.take(8).joinToString("\n\n"))
                 .setPositiveButton("متوجه شدم", null).show()
             return
@@ -1332,7 +1345,13 @@ class MainActivity : AppCompatActivity() {
         val total = questions.length()
         label(mission.optString("orgName", "دستگاه اجرایی"), 19, true, navy)
         gap(4)
-        content.addView(chip("$total پاسخ · ${EvidenceRefs.count(draft.attachments)} مستند", Color.rgb(234, 242, 251), navy))
+        val evaluated = draft.answeredCount(mission)
+        val missing = draft.unscoredIds(mission)
+        content.addView(chip("$evaluated از $total بند امتیازدهی شده · ${EvidenceRefs.count(draft.attachments)} مستند", Color.rgb(234, 242, 251), navy))
+        if (missing.isNotEmpty()) {
+            gap(8)
+            label("${missing.size} بند ارزیابی‌نشده است؛ این موارد امتیاز صفر نمی‌گیرند.", 13, true, Color.rgb(150, 96, 31))
+        }
         gap(16)
         for (i in 0 until questions.length()) {
             val q = questions.optJSONObject(i) ?: continue
@@ -1344,7 +1363,8 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(14), dp(13), dp(14), dp(13))
             }
             panel.addView(text("${i + 1}. $title", 14, true, navy))
-            panel.addView(text("امتیاز: ${draft.answers.optString(id)} از ۱۰۰", 13, true, teal))
+            val rawScore = draft.answers.optString(id)
+            panel.addView(text(if (rawScore.isBlank()) "امتیاز: ارزیابی‌نشده" else "امتیاز: $rawScore از ۱۰۰", 13, true, if (rawScore.isBlank()) muted else teal))
             val note = draft.notes.optString(id)
             if (note.isNotBlank()) panel.addView(text("توضیح: $note", 12, false, muted))
             val attachments = EvidenceRefs.references(draft.attachments, id)
@@ -1362,24 +1382,100 @@ class MainActivity : AppCompatActivity() {
             else "اینترنت در دسترس نیست. گزارش رمزنگاری‌شده در صف دستگاه می‌ماند تا خودتان آن را ارسال کنید.",
             12, false, muted)
         gap(10)
-        button("تأیید گزارش و امضای لمسی") { showSignatureScreen(mission, draft) }
+        button("تأیید گزارش و امضای لمسی") { askBeforeSignature(mission, draft) }
         secondaryButton("بازگشت به ویرایش") { showMission(mission, currentQuestionIndex) }
     }
 
-    /** Full-screen native signature capture after the complete report review. */
+    /** Warn about missing scores and record an explicit, content-bound decision. */
+    private fun askBeforeSignature(mission: JSONObject, draft: InspectionDraft) {
+        val problems = draft.validate(mission)
+        if (problems.isNotEmpty()) {
+            AlertDialog.Builder(this).setTitle("مواردی نیازمند اصلاح است")
+                .setMessage(problems.take(12).joinToString("\n") + if (problems.size > 12) "\nو ${problems.size-12} مورد دیگر" else "")
+                .setPositiveButton("بازگشت به ویرایش", null).show()
+            return
+        }
+        val missing = draft.unscoredIds(mission)
+        if (missing.isEmpty()) {
+            draft.clearAcknowledgement(); draft.save()
+            showSignatureScreen(mission, draft)
+            return
+        }
+        val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
+        val unscored = missing.toSet()
+        val descriptions = (0 until questions.length()).mapNotNull { idx ->
+            val q = questions.optJSONObject(idx) ?: return@mapNotNull null
+            if (q.optString("id") in unscored) "${idx+1}. ${q.optString("text", q.optString("title", q.optString("id")))}" else null
+        }
+        // Android AlertDialog makes a long message scrollable: show every omitted item.
+        val summary = descriptions.joinToString("\n")
+        val remaining = ""
+        AlertDialog.Builder(this)
+            .setTitle("هشدار: ${missing.size} بند بدون امتیاز")
+            .setMessage("${draft.answeredCount(mission)} بند ارزیابی شده است. بندهای زیر بدون امتیاز می‌مانند و صفر محسوب نمی‌شوند:\n\n$summary$remaining\n\nآیا مایل هستید گزارش را با همین وضعیت امضا و ارسال کنید؟")
+            .setNegativeButton("خیر، بازگشت") { _, _ -> showReportReview(mission, draft) }
+            .setNeutralButton("اصلاح اولین بند") { _, _ ->
+                val first = (0 until questions.length()).firstOrNull { questions.optJSONObject(it)?.optString("id") in unscored } ?: 0
+                showMission(mission, first)
+            }
+            .setPositiveButton("بله، ادامه و امضا") { _, _ ->
+                draft.acknowledgeUnscored(mission)
+                showSignatureScreen(mission, draft)
+            }.show()
+    }
+
+    /** Native signature capture; content changes invalidate this signature. */
     private fun showSignatureScreen(mission: JSONObject, draft: InspectionDraft) {
-        if (draft.validate(mission).isNotEmpty()) { notifyShort("قبل از امضا همه بندها را تکمیل کنید"); return }
-        screen("امضای بازرس", "برای تأیید نسخه نهایی گزارش، داخل کادر امضا کنید")
-        label(mission.optString("orgName", "دستگاه اجرایی"), 18, true, navy)
-        label("این امضا، تصویر دست‌نویس است؛ تأیید هویت با نشست امن و رسید سرور ثبت می‌شود.", 12, false, muted)
-        gap(15)
-        val signaturePad = SignaturePad(this).apply { background = rounded(Color.WHITE, 16) }
-        content.addView(signaturePad, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(340)))
-        gap(16)
-        secondaryButton("پاک کردن و امضای دوباره") { signaturePad.clearSignature() }
-        button("ثبت امضا و انتقال به صف ارسال") {
-            if (!signaturePad.hasInk()) { notifyShort("لطفاً امضای خود را در کادر ثبت کنید"); return@button }
-            try {
+        if (draft.validate(mission).isNotEmpty() || !draft.hasAcknowledgedUnscored(mission)) {
+            askBeforeSignature(mission, draft); return
+        }
+        // A dedicated Native touch canvas, filling the available app height.
+        window.statusBarColor = navy
+        window.navigationBarColor = Color.WHITE
+        shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(16), dp(12), dp(16), dp(16))
+            setBackgroundColor(pageBg)
+        }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(7), dp(7), dp(7), dp(12))
+        }
+        heading.addView(text("امضای نهایی بازرس", 23, true, navy))
+        heading.addView(text(mission.optString("orgName", "دستگاه اجرایی"), 15, true, ink))
+        heading.addView(text("با انگشت یا قلم در کادر سفید امضا کنید.", 13, false, muted))
+        val remaining = draft.unscoredIds(mission).size
+        if (remaining > 0) {
+            heading.addView(text("با تأیید شما، $remaining بند بدون امتیاز ثبت خواهد شد.", 12, true, Color.rgb(150,96,31)))
+        }
+        shell.addView(heading)
+        val signatureFrame = MaterialCardView(this).apply {
+            radius = dp(18).toFloat()
+            strokeWidth = dp(2)
+            strokeColor = gold
+            setCardBackgroundColor(Color.WHITE)
+            cardElevation = 0f
+        }
+        val signaturePad = SignaturePad(this)
+        signatureFrame.addView(signaturePad, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        shell.addView(signatureFrame, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { bottomMargin = dp(12) })
+        val note = text("امضای لمسی تصویر دست‌نویس است و جایگزین گواهی امضای دیجیتال نیست.", 11, false, muted)
+        shell.addView(note, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+        val clear = makeButton("پاک کردن امضا", false) { signaturePad.clearSignature() }
+        shell.addView(clear, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply {
+            bottomMargin = dp(8)
+        })
+        val confirm = makeButton("ثبت امضا و افزودن به صف ارسال", true) {
+            if (!signaturePad.hasInk()) {
+                notifyShort("لطفاً امضای خود را در کادر ثبت کنید")
+            } else if (!draft.hasAcknowledgedUnscored(mission) || draft.validate(mission).isNotEmpty()) {
+                notifyShort("اطلاعات گزارش تغییر کرده؛ لطفاً دوباره بررسی کنید")
+                showReportReview(mission, draft)
+            } else try {
                 draft.save()
                 signatures.save(draft, signaturePad.toPng())
                 outbox.enqueue(mission, draft)
@@ -1387,7 +1483,13 @@ class MainActivity : AppCompatActivity() {
                 notifyShort("گزارش امضاشده در صف ارسال ثبت شد")
             } catch (error: Exception) { notifyShort(AppErrorMessages.forUser(error)) }
         }
-        secondaryButton("بازگشت به گزارش") { showReportReview(mission, draft) }
+        shell.addView(confirm, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(55)).apply {
+            bottomMargin = dp(8)
+        })
+        shell.addView(makeButton("بازگشت به مرور گزارش", false) {
+            showReportReview(mission, draft)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+        setContentView(shell)
     }
 
     /** User-initiated sequential batch: one receipt per mission, no background uploads. */
@@ -1398,11 +1500,11 @@ class MainActivity : AppCompatActivity() {
         val ready = entries.filter { item ->
             val draft = InspectionDraft(item.optString("mission_key"), store)
             val mission = item.optJSONObject("mission")
-            mission != null && draft.validate(mission).isEmpty() && signatures.get(draft) != null
+            mission != null && draft.validate(mission).isEmpty() && draft.hasAcknowledgedUnscored(mission) && signatures.get(draft) != null
         }
-        if (ready.isEmpty()) { notifyShort("هیچ گزارش کامل و امضاشده‌ای برای ارسال آماده نیست"); return }
+        if (ready.isEmpty()) { notifyShort("گزارش امضاشده و آماده ارسال وجود ندارد"); return }
         AlertDialog.Builder(this).setTitle("ارسال گروهی گزارش‌ها")
-            .setMessage("${ready.size} گزارش تکمیل و امضاشده به‌ترتیب ارسال می‌شوند. گزارش‌های ناقص یا بدون امضا ارسال نمی‌شوند. ادامه می‌دهید؟")
+            .setMessage("${ready.size} گزارش امضاشده به‌ترتیب ارسال می‌شوند. گزارش‌های دارای بند بدون امتیاز فقط با تأیید قبلی بازرس ارسال خواهند شد. ادامه می‌دهید؟")
             .setNegativeButton("انصراف", null)
             .setPositiveButton("شروع ارسال") { _, _ ->
                 bulkOk = 0; bulkFailed = 0
@@ -1464,6 +1566,8 @@ class MainActivity : AppCompatActivity() {
             }
             panel.addView(text(item.optString("organization", "دستگاه اجرایی"), 16, true, navy))
             panel.addView(text(status, 13, true, if (state == "failed") Color.rgb(166, 82, 35) else teal))
+            val unscored = InspectionDraft(key, store).unscoredIds(mission).size
+            if (unscored > 0) panel.addView(text("$unscored بند ارزیابی‌نشده · ادامه ارسال با تأیید امضاشده بازرس", 12, false, Color.rgb(150,96,31)))
             val attempts = item.optInt("attempts", 0)
             if (attempts > 0) panel.addView(text("تعداد تلاش‌های ارسال: $attempts", 11, false, muted))
             if (item.optString("error").isNotBlank()) panel.addView(text("آخرین خطا: ${item.optString("error")}", 11, false, muted))
@@ -1484,7 +1588,7 @@ class MainActivity : AppCompatActivity() {
             panel.addView(edit, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(7) })
             content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         }
-        label("ارسال گروهی تنها با تأیید بازرس اجرا می‌شود. گزارش‌های ناقص یا بدون امضا در دستگاه محفوظ می‌مانند.", 12, false, muted)
+        label("ارسال گروهی فقط گزارش‌های امضاشده را ارسال می‌کند. بندهای بدون امتیاز تنها پس از تأیید صریح بازرس مجازند.", 12, false, muted)
         secondaryButton("بازگشت به مأموریت‌ها") { showHome("missions") }
     }
 
@@ -1500,7 +1604,10 @@ class MainActivity : AppCompatActivity() {
         }
         val draft = InspectionDraft(key, store)
         val issues = draft.validate(mission)
-        if (issues.isNotEmpty()) { notifyShort("گزارش ناقص است؛ آن را به ویرایش بازگردانید"); onFinished?.invoke(false); return }
+        if (issues.isNotEmpty() || !draft.hasAcknowledgedUnscored(mission)) {
+            notifyShort("گزارش نیازمند اصلاح یا تأیید بندهای بدون امتیاز است")
+            onFinished?.invoke(false); return
+        }
         val signature = signatures.get(draft)
         if (signature == null) { notifyShort("امضا موجود نیست یا گزارش پس از امضا تغییر کرده است؛ مجدداً امضا کنید"); onFinished?.invoke(false); return }
         work({
@@ -1543,6 +1650,9 @@ class MainActivity : AppCompatActivity() {
                     .put("finished_at", record.optString("finished_at", Instant.now().toString()))
                     .put("signature_png_base64", signature.getString("signature_png_base64"))
                     .put("signed_at_device", signature.optString("signed_at"))
+                    .put("allow_unscored", draft.unscoredIds(mission).isNotEmpty())
+                    .put("acknowledged_unscored_ids", draft.acknowledgedIds())
+                    .put("acknowledged_at_device", draft.acknowledgedAt)
                 val response = api.post("mobile_submit.php", request, session, draft.submissionKey)
                 if (!response.optBoolean("ok")) throw IllegalStateException("تأیید نهایی سرور دریافت نشد")
                 Pair(response, null as Exception?)
@@ -1595,6 +1705,14 @@ class MainActivity : AppCompatActivity() {
                 panel.addView(text(report.optString("org_name", "دستگاه اجرایی"), 16, true, navy))
                 panel.addView(text("شماره رسید: ${report.optString("receipt_code")}", 12, false, muted))
                 panel.addView(text("تاریخ: ${report.optString("submitted_at")}", 12, false, muted))
+                val status = report.optString("evaluation_status", "legacy")
+                val scored = report.optInt("answered_count", 0)
+                val total = report.optInt("question_count", 0)
+                if (total > 0) {
+                    panel.addView(text("پوشش ارزیابی: $scored از $total بند · " +
+                        if (status == "partial") "دارای بندهای بدون امتیاز" else "کامل", 12, false,
+                        if (status == "partial") Color.rgb(150, 96, 31) else muted))
+                }
                 val available = report.optBoolean("official_ready", false)
                 panel.addView(text(if (available) "گزارش رسمی قابل دریافت است" else "در انتظار تأیید مدیر یا آماده‌سازی PDF", 12, true, if (available) Color.rgb(25,124,79) else muted))
                 if (available) {
