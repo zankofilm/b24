@@ -72,6 +72,12 @@ class MainActivity : AppCompatActivity() {
     private var bulkPending: ArrayDeque<String>? = null
     private var bulkOk = 0
     private var bulkFailed = 0
+    // Explicit native progress surface. Does not claim server acceptance until a receipt arrives.
+    private var transferDialog: AlertDialog? = null
+    private var transferTitle: TextView? = null
+    private var transferDetail: TextView? = null
+    private var transferBar: LinearProgressIndicator? = null
+    private var bulkTotal = 0
     private var pendingOfficialPdf: Pair<Int, String>? = null
     private val officialPdfPicker = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val selection = pendingOfficialPdf
@@ -1492,11 +1498,72 @@ class MainActivity : AppCompatActivity() {
         setContentView(shell)
     }
 
+    /** Native, modal progress UI: reports transmitted bytes, stages and the active file. */
+    private fun showTransferDialog(title: String) {
+        if (transferDialog != null) return
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(22), dp(16), dp(22), dp(22))
+        }
+        val headline = text(title, 17, true, navy)
+        val detail = text("آماده‌سازی اتصال امن…", 13, false, muted)
+        val bar = LinearProgressIndicator(this).apply {
+            isIndeterminate = false
+            max = 100
+            setProgressCompat(0, false)
+            setIndicatorColor(gold)
+            trackColor = Color.rgb(225, 230, 236)
+        }
+        column.addView(headline)
+        column.addView(detail, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(12); bottomMargin = dp(12)
+        })
+        column.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)))
+        column.addView(text("این نوار روند انتقال از دستگاه را نشان می‌دهد. ثبت نهایی فقط با رسید سرور قطعی است.",
+            11, false, muted), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+        transferTitle = headline
+        transferDetail = detail
+        transferBar = bar
+        transferDialog = AlertDialog.Builder(this)
+            .setTitle("وضعیت ارسال گزارش")
+            .setView(column)
+            .setCancelable(false)
+            .create().also { it.show() }
+    }
+
+    /** Data comes from the IO thread; progress is marshalled back to the main thread. */
+    private fun updateTransferProgress(title: String, detail: String, percent: Int) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed || transferDialog == null) return@runOnUiThread
+            transferTitle?.text = title
+            transferDetail?.text = detail
+            transferBar?.setProgressCompat(percent.coerceIn(0, 100), true)
+        }
+    }
+
+    private fun dismissTransferDialog() {
+        transferDialog?.dismiss()
+        transferDialog = null
+        transferTitle = null
+        transferDetail = null
+        transferBar = null
+    }
+
+    private fun transferScope(): String {
+        val queue = bulkPending
+        return if (queue == null) "گزارش جاری" else
+            "گزارش ${bulkTotal - queue.size} از $bulkTotal"
+    }
+
     /** User-initiated sequential batch: one receipt per mission, no background uploads. */
     private fun sendAllQueued() {
         val entries = outbox.entries()
         if (entries.isEmpty()) { notifyShort("گزارشی برای ارسال وجود ندارد"); return }
         if (!online() || deviceToken == null) { notifyShort("اتصال اینترنت و ورود امن لازم است"); return }
+        if (busy) { notifyShort("عملیات دیگری در حال انجام است؛ پس از پایان آن ارسال کنید"); return }
         val ready = entries.filter { item ->
             val draft = InspectionDraft(item.optString("mission_key"), store)
             val mission = item.optJSONObject("mission")
@@ -1508,7 +1575,9 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("انصراف", null)
             .setPositiveButton("شروع ارسال") { _, _ ->
                 bulkOk = 0; bulkFailed = 0
+                bulkTotal = ready.size
                 bulkPending = ArrayDeque(ready.map { it.optString("mission_key") })
+                showTransferDialog("ارسال گروهی ${ready.size} گزارش")
                 continueBulk()
             }.show()
     }
@@ -1516,6 +1585,8 @@ class MainActivity : AppCompatActivity() {
         val queue = bulkPending ?: return
         if (queue.isEmpty()) {
             bulkPending = null
+            bulkTotal = 0
+            dismissTransferDialog()
             showOutbox()
             AlertDialog.Builder(this).setTitle("نتیجه ارسال گروهی")
                 .setMessage("موفق: $bulkOk گزارش\nناموفق: $bulkFailed گزارش\nگزارش‌های ناموفق در دستگاه محفوظ مانده‌اند.")
@@ -1594,6 +1665,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendQueued(key: String, onFinished: ((Boolean) -> Unit)? = null) {
         if (!online()) { notifyShort("برای ارسال گزارش، اتصال معتبر اینترنت لازم است"); onFinished?.invoke(false); return }
+        if (busy) { notifyShort("عملیات دیگری در حال انجام است؛ برای جلوگیری از ارسال تکراری صبر کنید"); onFinished?.invoke(false); return }
         val token = deviceToken ?: run { notifyShort("ابتدا با حساب امن بازرس وارد شوید"); onFinished?.invoke(false); return }
         val record = outbox.get(key) ?: run { notifyShort("رکورد صف پیدا نشد"); onFinished?.invoke(false); return }
         val mission = record.optJSONObject("mission") ?: run { notifyShort("اطلاعات مأموریت ناقص است"); onFinished?.invoke(false); return }
@@ -1610,17 +1682,31 @@ class MainActivity : AppCompatActivity() {
         }
         val signature = signatures.get(draft)
         if (signature == null) { notifyShort("امضا موجود نیست یا گزارش پس از امضا تغییر کرده است؛ مجدداً امضا کنید"); onFinished?.invoke(false); return }
+        if (transferDialog == null) showTransferDialog("ارسال گزارش ${record.optString("organization", "بازرسی")}")
+        val scope = transferScope()
         work({
+            var currentStage = "دریافت نشست امن"
             try {
                 outbox.setState(key, "uploading")
                 val session = sessionFor(token)
                 val uploads = JSONArray()
                 val saved = outbox.get(key)?.optJSONObject("uploaded") ?: JSONObject()
+                val documentCount = EvidenceRefs.count(draft.attachments)
+                val stages = documentCount + 2 // Evidence, JSON/signature, receipt acknowledgement.
+                var completedStages = 0
+                var documentNumber = 0
+                updateTransferProgress(scope, "در حال احراز هویت و بررسی مستندات ($documentCount فایل)", 0)
                 val hashes = mutableMapOf<String, String>()
                 val ids = draft.attachments.keys()
                 while (ids.hasNext()) {
                     val question = ids.next()
                     for (reference in EvidenceRefs.references(draft.attachments, question)) {
+                        documentNumber++
+                        val position = documentNumber
+                        currentStage = "آپلود مستند $position از $documentCount"
+                        updateTransferProgress(scope,
+                            "آماده‌سازی مستند $position از $documentCount؛ بند $question",
+                            (completedStages * 100 / stages))
                         val attachment = evidenceVault.read(reference, contentResolver)
                         val sha = MessageDigest.getInstance("SHA-256").digest(attachment.bytes)
                             .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
@@ -1632,7 +1718,15 @@ class MainActivity : AppCompatActivity() {
                         }
                         val existingId = saved.optInt("$question:$sha", 0)
                         val fileId = if (existingId > 0) existingId else {
-                            val response = api.uploadEvidence(session, attachment.bytes, attachment.mime, attachment.name, key, question)
+                            val response = api.uploadEvidence(
+                                session, attachment.bytes, attachment.mime, attachment.name, key, question
+                            ) { sent, total ->
+                                val completePart = if (total > 0L) (sent * 100L / total).toInt() else 0
+                                updateTransferProgress(scope,
+                                    "مستند $position از $documentCount: ${attachment.name.take(60)}\n" +
+                                        "ارسال‌شده از گوشی: ${sent / 1024} از ${total / 1024} کیلوبایت",
+                                    ((completedStages * 100) + completePart) / stages)
+                            }
                             val id = response.getInt("file_id")
                             val acceptedQuestion = response.optString("question_key", question)
                             if (acceptedQuestion.isNotBlank() && acceptedQuestion != question) {
@@ -1642,6 +1736,10 @@ class MainActivity : AppCompatActivity() {
                             id
                         }
                         uploads.put(JSONObject().put("file_id", fileId).put("question_id", question))
+                        completedStages++
+                        updateTransferProgress(scope,
+                            "مستند $position از $documentCount در سرور تأیید شد · ${completedStages} از $stages مرحله",
+                            (completedStages * 100 / stages))
                     }
                 }
                 val request = JSONObject().put("mission_key", key).put("answers", draft.answers)
@@ -1653,16 +1751,48 @@ class MainActivity : AppCompatActivity() {
                     .put("allow_unscored", draft.unscoredIds(mission).isNotEmpty())
                     .put("acknowledged_unscored_ids", draft.acknowledgedIds())
                     .put("acknowledged_at_device", draft.acknowledgedAt)
-                val response = api.post("mobile_submit.php", request, session, draft.submissionKey)
-                if (!response.optBoolean("ok")) throw IllegalStateException("تأیید نهایی سرور دریافت نشد")
+                currentStage = "ثبت گزارش، پاسخ‌ها و امضا"
+                val answered = draft.answeredCount(mission)
+                val omitted = draft.unscoredIds(mission).size
+                updateTransferProgress(scope,
+                    "ارسال پاسخ‌ها: $answered بند · ارزیابی‌نشده: $omitted بند · امضای لمسی",
+                    completedStages * 100 / stages)
+                val response = api.post(
+                    "mobile_submit.php", request, session, draft.submissionKey,
+                    onProgress = { sent, total ->
+                        val partial = if (total > 0L) (sent * 100L / total).toInt() else 0
+                        updateTransferProgress(scope,
+                            "ارسال گزارش و امضا: ${sent / 1024} از ${total / 1024} کیلوبایت\n" +
+                                "$answered بند امتیازدار · $omitted بند بدون امتیاز",
+                            ((completedStages * 100) + partial) / stages)
+                    },
+                    onAwaitingResponse = {
+                        updateTransferProgress(scope,
+                            "بسته گزارش، پاسخ‌ها و امضا از دستگاه ارسال شد.\nدر انتظار بررسی و رسید سرور…",
+                            (((completedStages + 1) * 100) / stages).coerceAtMost(95))
+                    }
+                )
+                completedStages++
+                updateTransferProgress(scope, "انتظار برای دریافت و ثبت رسید سرور…", completedStages * 100 / stages)
+                if (!response.optBoolean("ok")) throw UserActionException("تأیید نهایی سرور دریافت نشد؛ گزارش حفظ شد")
+                updateTransferProgress(scope,
+                    "رسید سرور دریافت شد: ${response.optString("receipt_code", "ثبت شد")}", 100)
                 Pair(response, null as Exception?)
             } catch (e: Exception) {
-                outbox.setState(key, "failed", AppErrorMessages.forUser(e))
+                // A server-side cleanup may invalidate file IDs saved after an earlier attempt.
+                // Do not retry automatically; on the next user-initiated attempt re-upload them.
+                if (e is ApiException && e.error == "invalid_upload_reference") {
+                    outbox.forgetUploadedReferences(key)
+                }
+                val safeError = "مرحله: $currentStage\n" + AppErrorMessages.forUser(e)
+                outbox.setState(key, "failed", safeError)
+                updateTransferProgress(scope, "ارسال ناموفق؛ داده‌ها و امضا حفظ شدند", safeError.take(600), 0)
                 Pair(null as JSONObject?, e)
             }
         }) { result ->
             val response = result.first
             if (response != null) {
+                if (onFinished == null) dismissTransferDialog()
                 store.save("receipt:$key", response.toString())
                 // A local history write failure must not turn a server-confirmed success into a retry.
                 runCatching { receiptHistory.save(mission, draft, response) }
@@ -1676,8 +1806,16 @@ class MainActivity : AppCompatActivity() {
                         .setPositiveButton("تأیید") { _, _ -> showOutbox() }.show()
                 } else onFinished(true)
             } else {
-                if (onFinished == null) { showOutbox(); notifyShort("ارسال ناموفق بود؛ پیش‌نویس و مستندات حفظ شدند") }
-                else onFinished(false)
+                if (onFinished == null) {
+                    dismissTransferDialog()
+                    showOutbox()
+                    val message = outbox.get(key)?.optString("error").orEmpty().ifBlank {
+                        "اطلاعات و مستندات در گوشی محفوظ ماندند."
+                    }
+                    AlertDialog.Builder(this).setTitle("علت ناموفق بودن ارسال")
+                        .setMessage(message + "\n\nپیش‌نویس، امضا و مستندات حذف نشده‌اند.")
+                        .setPositiveButton("متوجه شدم", null).show()
+                } else onFinished(false)
             }
         }
     }

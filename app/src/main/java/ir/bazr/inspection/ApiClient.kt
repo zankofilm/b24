@@ -8,18 +8,38 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
-class ApiException(val status: Int, val error: String, val details: String) : IOException("HTTP $status: $error")
+class ApiException(
+    val status: Int, val error: String, val details: String,
+    val requestId: String = "", val apiVersion: String = "", val submitVersion: String = ""
+) : IOException("HTTP $status: $error")
 
 /** Network calls are synchronous: invoke from the Activity's background executor. */
 class ApiClient(private val base: String) {
     init { require(base.startsWith("https://") && base.endsWith("/")) }
 
-    fun post(path: String, body: JSONObject, bearer: String? = null, idempotencyKey: String? = null): JSONObject {
+    fun post(
+        path: String, body: JSONObject, bearer: String? = null,
+        idempotencyKey: String? = null, onProgress: ((Long, Long) -> Unit)? = null,
+        onAwaitingResponse: (() -> Unit)? = null
+    ): JSONObject {
         val conn = open(path, "POST", bearer)
         conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
         idempotencyKey?.let { conn.setRequestProperty("Idempotency-Key", it) }
         conn.doOutput = true
-        conn.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
+        val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
+        conn.setFixedLengthStreamingMode(bytes.size)
+        conn.outputStream.use { stream ->
+            var offset = 0
+            var lastPercent = -1
+            while (offset < bytes.size) {
+                val size = minOf(8192, bytes.size - offset)
+                stream.write(bytes, offset, size)
+                offset += size
+                val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
+                if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
+            }
+        }
+        onAwaitingResponse?.invoke()
         return read(conn)
     }
 
@@ -77,6 +97,7 @@ class ApiClient(private val base: String) {
     fun uploadEvidence(
         bearer: String, bytes: ByteArray, mime: String, displayName: String,
         mission: String, question: String,
+        onProgress: ((Long, Long) -> Unit)? = null,
     ): JSONObject {
         if (bytes.isEmpty() || bytes.size > 12 * 1024 * 1024) throw UserActionException("حجم مستند نامعتبر است")
         if (mime !in setOf("image/jpeg", "image/png", "image/webp", "application/pdf")) {
@@ -97,7 +118,19 @@ class ApiClient(private val base: String) {
         start.write(("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\nContent-Type: $mime\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
         val end = "\r\n--$boundary--\r\n".toByteArray()
         conn.setFixedLengthStreamingMode(start.size() + bytes.size + end.size)
-        conn.outputStream.use { stream -> stream.write(start.toByteArray()); stream.write(bytes); stream.write(end) }
+        conn.outputStream.use { stream ->
+            stream.write(start.toByteArray())
+            var offset = 0
+            var lastPercent = -1
+            while (offset < bytes.size) {
+                val size = minOf(8192, bytes.size - offset)
+                stream.write(bytes, offset, size)
+                offset += size
+                val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
+                if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
+            }
+            stream.write(end)
+        }
         return read(conn)
     }
 
@@ -120,11 +153,15 @@ class ApiClient(private val base: String) {
                 result.toString()
             } ?: ""
             val obj = try { JSONObject(response) } catch (_: Exception) { null }
-            if (obj == null) throw ApiException(status, "invalid_server_response", "")
+            val requestId = conn.getHeaderField("X-BAZR-Request").orEmpty()
+                .takeIf { it.matches(Regex("[A-Za-z0-9._:-]{8,128}")) }.orEmpty()
+            val apiVersion = conn.getHeaderField("X-BAZR-API-Version").orEmpty().take(32)
+            val submitVersion = conn.getHeaderField("X-BAZR-Mobile-Submit-Version").orEmpty().take(32)
+            if (obj == null) throw ApiException(status, "invalid_server_response", "", requestId, apiVersion, submitVersion)
             val rawError = obj.opt("error")
             val error = if (rawError == null || rawError == JSONObject.NULL) "" else rawError.toString()
             if (status !in 200..299 || error.isNotBlank()) {
-                throw ApiException(status, error.ifBlank { "request_failed" }, "")
+                throw ApiException(status, error.ifBlank { "request_failed" }, "", requestId, apiVersion, submitVersion)
             }
             return obj
         } finally { conn.disconnect() }

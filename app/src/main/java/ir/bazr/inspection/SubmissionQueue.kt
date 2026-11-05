@@ -39,7 +39,7 @@ class SubmissionQueue(private val store: SecureStore) {
         get(key)?.let { item ->
             if (state == "uploading") item.put("attempts", item.optInt("attempts", 0) + 1)
             item.put("state", state)
-                .put("error", error.take(220))
+                .put("error", error.take(600))
                 .put("updated_at", Instant.now().toString())
             saveRecord(key, item)
         }
@@ -51,6 +51,13 @@ class SubmissionQueue(private val store: SecureStore) {
             val uploads = item.optJSONObject("uploaded") ?: JSONObject()
             uploads.put("$question:$sha256", fileId)
             saveRecord(key, item.put("uploaded", uploads))
+        }
+    }
+    /** Server rejected cached upload IDs: allow the next explicit retry to re-upload files. */
+    fun forgetUploadedReferences(key: String) {
+        get(key)?.let { item ->
+            item.put("uploaded", JSONObject())
+            saveRecord(key, item)
         }
     }
     fun remove(key: String) {
