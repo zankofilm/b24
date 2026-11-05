@@ -1707,8 +1707,18 @@ class MainActivity : AppCompatActivity() {
                         updateTransferProgress(scope,
                             "آماده‌سازی مستند $position از $documentCount؛ بند $question",
                             (completedStages * 100 / stages))
+                        // Transport-only optimization also covers photos in older saved drafts.
+                        // The encrypted original remains untouched until server receipt.
                         val attachment = evidenceVault.read(reference, contentResolver)
-                        val sha = MessageDigest.getInstance("SHA-256").digest(attachment.bytes)
+                        val prepared = PhotoUploadOptimizer.prepare(attachment)
+                        if (prepared.optimized) {
+                            updateTransferProgress(scope,
+                                "بهینه‌سازی عکس $position از $documentCount: " +
+                                    "${(prepared.originalBytes + 1023) / 1024} ← ${(prepared.bytes.size + 1023) / 1024} کیلوبایت\n" +
+                                    "نسخه اصلی مستند در دستگاه حفظ شده است",
+                                (completedStages * 100 / stages))
+                        }
+                        val sha = MessageDigest.getInstance("SHA-256").digest(prepared.bytes)
                             .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
                         val usedBy = hashes.putIfAbsent(sha, question)
                         if (usedBy != null) {
@@ -1719,11 +1729,11 @@ class MainActivity : AppCompatActivity() {
                         val existingId = saved.optInt("$question:$sha", 0)
                         val fileId = if (existingId > 0) existingId else {
                             val response = api.uploadEvidence(
-                                session, attachment.bytes, attachment.mime, attachment.name, key, question
+                                session, prepared.bytes, prepared.mime, prepared.name, key, question
                             ) { sent, total ->
                                 val completePart = if (total > 0L) (sent * 100L / total).toInt() else 0
                                 updateTransferProgress(scope,
-                                    "مستند $position از $documentCount: ${attachment.name.take(60)}\n" +
+                                    "مستند $position از $documentCount: ${prepared.name.take(60)}\n" +
                                         "ارسال‌شده از گوشی: ${sent / 1024} از ${total / 1024} کیلوبایت",
                                     ((completedStages * 100) + completePart) / stages)
                             }
