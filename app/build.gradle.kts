@@ -14,8 +14,8 @@ android {
         applicationId = "ir.bazr.inspection"
         minSdk = 30
         targetSdk = 35
-        versionCode = 15
-        versionName = "4.9.1-native-supervisor-history"
+        versionCode = 16
+        versionName = "4.10.0-native-inspector-access"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     buildFeatures { buildConfig = true }

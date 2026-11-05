@@ -488,6 +488,7 @@ class MainActivity : AppCompatActivity() {
         val items = mutableListOf(
             Triple("home", "خانه", R.drawable.ic_home),
             Triple("missions", "مأموریت‌ها", R.drawable.ic_clipboard),
+            Triple("departments", "ادارات مجاز", R.drawable.ic_building),
             Triple("drafts", "پیش‌نویس‌ها", R.drawable.ic_notes),
             Triple("account", "حساب", R.drawable.ic_person)
         )
@@ -796,7 +797,7 @@ class MainActivity : AppCompatActivity() {
             serverSnapshot = payload
             store.save("mobile_sync", payload.toString())
             store.putString("last_sync", Instant.now().toString())
-            showHome(if (activeTab in setOf("home", "missions", "drafts", "account", "supervisor") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
+            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
             if (newCount > 0) {
                 sendMissionNotification(newCount)
                 notifyShort("$newCount مأموریت جدید دریافت شد؛ از فهرست مأموریت‌ها مشاهده کنید")
@@ -954,6 +955,29 @@ class MainActivity : AppCompatActivity() {
         destination.addView(card,lp)
     }
 
+    private fun departmentItem(org: JSONObject, destination: LinearLayout = content) {
+        val name = org.optString("name", "اداره بدون نام").ifBlank { "اداره بدون نام" }
+        val code = org.optString("code", "").ifBlank { org.optString("id", "") }
+        val group = org.optString("comparisonGroup", "").ifBlank { org.optString("category", "گروه ثبت‌نشده") }
+        val card = MaterialCardView(this).apply {
+            radius = dp(16).toFloat(); strokeWidth = dp(1); strokeColor = line
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL; setPadding(dp(14), dp(13), dp(14), dp(13))
+        }
+        row.addView(iconBadge(R.drawable.ic_building, 23), LinearLayout.LayoutParams(dp(46), dp(46)))
+        val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(11), 0, dp(7), 0) }
+        info.addView(text(name, 14, true, navy))
+        info.addView(text("کد: $code  •  گروه: $group", 11, false, muted))
+        row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(chip("مجاز", Color.rgb(228, 247, 240), Color.rgb(21, 116, 77)))
+        card.addView(row)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) }
+        destination.addView(card, lp)
+    }
+
     private fun showHome(tab: String = "home") {
         selectedMission = null
         openDraft = null
@@ -1006,6 +1030,8 @@ class MainActivity : AppCompatActivity() {
                     if (available.isNotEmpty()) showMission(available.first())
                     else showHome("missions")
                 }
+                val authorizedCount = serverSnapshot.optJSONArray("authorized_organizations")?.length() ?: 0
+                secondaryButton("فهرست ادارات مجاز من (${authorizedCount})") { showHome("departments") }
                 val batch = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", false) {
                     if (queued.isEmpty()) showHome("drafts") else sendAllQueued()
                 }
@@ -1122,6 +1148,62 @@ class MainActivity : AppCompatActivity() {
                     override fun afterTextChanged(s: Editable?) {}
                 })
                 renderList()
+            }
+            "departments" -> {
+                screen("ادارات مجاز من", "فقط اداراتی که مدیر برای شما تعیین کرده است", withNav = true)
+                val orgs = serverSnapshot.optJSONArray("authorized_organizations") ?: JSONArray()
+                val access = serverSnapshot.optJSONObject("access_policy")
+                val mode = access?.optString("access_mode", "all") ?: "all"
+                val modeLabel = when (mode) {
+                    "selected" -> "دسترسی انتخابی و اختصاصی"
+                    "groups" -> "دسترسی بر اساس گروه اداری"
+                    else -> "دسترسی عمومی به ادارات فعال"
+                }
+                val banner = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line
+                    cardElevation = 0f; setCardBackgroundColor(Color.WHITE)
+                }
+                val bannerBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
+                bannerBody.addView(text(modeLabel, 14, true, navy))
+                bannerBody.addView(text("${orgs.length()} اداره در آخرین همگام‌سازی برای شما مجاز بوده است.", 12, false, muted))
+                banner.addView(bannerBody); content.addView(banner)
+                gap(10)
+                val search = field("جست‌وجوی نام اداره، کد یا گروه")
+                search.setSingleLine(true)
+                search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
+                search.compoundDrawablePadding = dp(8)
+                content.addView(search)
+                gap(8)
+                val count = text("", 12, false, muted)
+                content.addView(count)
+                val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                content.addView(results)
+                fun renderDepartments() {
+                    val query = search.text?.toString()?.trim().orEmpty()
+                    val filtered = (0 until orgs.length()).mapNotNull { orgs.optJSONObject(it) }.filter { org ->
+                        query.isBlank() || listOf(org.optString("name"), org.optString("code"), org.optString("comparisonGroup"), org.optString("category"))
+                            .any { it.contains(query, ignoreCase = true) }
+                    }
+                    count.text = "${filtered.size} اداره نمایش داده می‌شود"
+                    results.removeAllViews()
+                    if (filtered.isEmpty()) {
+                        val empty = text(if (orgs.length() == 0) "هنوز اداره‌ای برای شما مجاز نشده است." else "اداره‌ای با این جست‌وجو پیدا نشد.", 14, false, muted).apply {
+                            gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
+                        }
+                        results.addView(empty)
+                    } else filtered.forEach { departmentItem(it, results) }
+                }
+                search.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderDepartments()
+                    override fun afterTextChanged(s: Editable?) {}
+                })
+                renderDepartments()
+                gap(8)
+                label("تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.", 11, false, muted)
+                secondaryButton("همگام‌سازی دسترسی‌ها") {
+                    if (deviceToken == null) notifyShort("ابتدا وارد حساب بازرس شوید") else connectAndSync()
+                }
             }
             "drafts" -> {
                 screen("پیش‌نویس‌های من", "کارهای ذخیره‌شده روی همین دستگاه",withNav=true)
