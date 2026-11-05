@@ -14,8 +14,8 @@ android {
         applicationId = "ir.bazr.inspection"
         minSdk = 30
         targetSdk = 35
-        versionCode = 13
-        versionName = "4.8.3-native-photo-optimizer"
+        versionCode = 14
+        versionName = "4.9.0-native-supervisor-review"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     buildFeatures { buildConfig = true }

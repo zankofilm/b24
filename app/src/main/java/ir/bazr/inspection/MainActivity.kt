@@ -485,12 +485,15 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(8), dp(5), dp(8), dp(8))
             elevation = dp(8).toFloat()
         }
-        val items = listOf(
+        val items = mutableListOf(
             Triple("home", "خانه", R.drawable.ic_home),
             Triple("missions", "مأموریت‌ها", R.drawable.ic_clipboard),
             Triple("drafts", "پیش‌نویس‌ها", R.drawable.ic_notes),
             Triple("account", "حساب", R.drawable.ic_person)
         )
+        if (serverSnapshot.optJSONObject("supervisor")?.optBoolean("can_review", false) == true) {
+            items.add(2, Triple("supervisor", "سربازرس", R.drawable.ic_shield))
+        }
         for ((id, caption, drawable) in items) {
             val chosen = activeTab == id
             val item = LinearLayout(this).apply {
@@ -774,6 +777,9 @@ class MainActivity : AppCompatActivity() {
         work({
             val session = sessionFor(token)
             val payload = api.get("mobile_sync.php", session)
+            val supervisorInbox = try { api.get("mobile_supervisor_inbox.php", session) }
+                catch (_: Exception) { JSONObject().put("ok", true).put("can_review", false).put("items", JSONArray()) }
+            payload.put("supervisor", supervisorInbox)
             Pair(session, payload)
         }) { (session, payload) ->
             val previous = serverSnapshot.optJSONArray("missions") ?: JSONArray()
@@ -790,7 +796,7 @@ class MainActivity : AppCompatActivity() {
             serverSnapshot = payload
             store.save("mobile_sync", payload.toString())
             store.putString("last_sync", Instant.now().toString())
-            showHome(if (activeTab in setOf("home", "missions", "drafts", "account")) activeTab else "home")
+            showHome(if (activeTab in setOf("home", "missions", "drafts", "account", "supervisor") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
             if (newCount > 0) {
                 sendMissionNotification(newCount)
                 notifyShort("$newCount مأموریت جدید دریافت شد؛ از فهرست مأموریت‌ها مشاهده کنید")
@@ -1009,6 +1015,13 @@ class MainActivity : AppCompatActivity() {
                 val official = makeButton("گزارش رسمی | دریافت PDF", false) { showOfficialReports() }
                 official.setIconResource(R.drawable.ic_official_report)
                 content.addView(official)
+                val supervisor = serverSnapshot.optJSONObject("supervisor")
+                if (supervisor?.optBoolean("can_review", false) == true) {
+                    val pendingCount = supervisor.optJSONArray("items")?.length() ?: 0
+                    val review = makeButton("کارتابل سربازرس  •  ${pendingCount} گزارش منتظر بررسی", false) { showHome("supervisor") }
+                    review.setIconResource(R.drawable.ic_shield)
+                    content.addView(review)
+                }
                 secondaryButton("همگام‌سازی مأموریت‌ها") {
                     if (deviceToken == null) notifyShort("نشست دستگاه فعال نیست") else connectAndSync()
                 }
@@ -1029,6 +1042,7 @@ class MainActivity : AppCompatActivity() {
                 gap(8)
                 label("پیش‌نویس‌ها بدون اینترنت هم ذخیره می‌شوند؛ ارسال نهایی نیازمند اینترنت است.",12,false,muted)
             }
+            "supervisor" -> showSupervisorInbox()
             "missions" -> {
                 screen("مأموریت‌های من", "جست‌وجو و پیگیری مأموریت‌های ابلاغ‌شده", withNav = true)
                 val search = field("جست‌وجوی نام اداره")
@@ -1173,6 +1187,255 @@ class MainActivity : AppCompatActivity() {
                 label("نسخه ${BuildConfig.VERSION_NAME}  •  اتصال امن HTTPS",12,false,muted)
             }
             else -> showHome("home")
+        }
+    }
+
+    private fun showSupervisorInbox() {
+        activeTab = "supervisor"
+        selectedMission = null
+        openDraft = null
+        val supervisor = serverSnapshot.optJSONObject("supervisor") ?: JSONObject()
+        screen("کارتابل سربازرس", "بررسی گزارش‌های ارسال‌شده توسط بازرسان", withNav = true)
+        if (!supervisor.optBoolean("can_review", false)) {
+            emptyState("دسترسی سربازرس فعال نیست", "این حساب باید توسط مدیرکل به‌عنوان سربازرس تعیین شود.")
+            secondaryButton("بازگشت به خانه") { showHome("home") }
+            return
+        }
+        val items = supervisor.optJSONArray("items") ?: JSONArray()
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(Color.WHITE, 16)
+        }
+        header.addView(text("${items.length()} گزارش در انتظار بررسی", 18, true, navy))
+        header.addView(text("تأیید سربازرس مرحله اول است؛ پس از آن گزارش برای تأیید نهایی مدیریت ارسال می‌شود.", 12, false, muted).apply {
+            setPadding(0, dp(7), 0, 0)
+        })
+        content.addView(header)
+        gap(12)
+        secondaryButton("به‌روزرسانی کارتابل") { refreshSupervisorInbox() }
+        if (items.length() == 0) {
+            emptyState("گزارش منتظر بررسی ندارید", "گزارش‌های جدید پس از ارسال بازرس در همین قسمت نمایش داده می‌شوند.")
+            return
+        }
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val org = item.optString("org_name", "دستگاه اجرایی")
+            val inspector = item.optString("inspector_name", "بازرس")
+            val receipt = item.optString("receipt_code", "—")
+            val score = if (item.has("score") && !item.isNull("score")) item.optDouble("score").let { String.format(Locale.US, "%.1f", it) } else "—"
+            val answers = item.optJSONObject("evaluation")?.optInt("answered_count", 0) ?: 0
+            val total = item.optJSONObject("evaluation")?.optInt("question_count", 0) ?: 0
+            val panel = MaterialCardView(this).apply {
+                radius = dp(16).toFloat()
+                strokeWidth = dp(1)
+                strokeColor = line
+                cardElevation = dp(1).toFloat()
+                setCardBackgroundColor(Color.WHITE)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showSupervisorReport(item) }
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(15), dp(14), dp(15), dp(14))
+            }
+            box.addView(text(org, 17, true, navy))
+            box.addView(text("بازرس: $inspector  •  کد: ${item.optString("inspector_ref", "—")}", 12, false, muted).apply { setPadding(0, dp(6), 0, 0) })
+            box.addView(text("امتیاز: $score  •  پاسخ‌ها: $answers از $total", 13, true, ink).apply { setPadding(0, dp(8), 0, 0) })
+            box.addView(text("رسید: $receipt  •  وضعیت: ${if (item.optString("review_status") == "admin_review") "در انتظار تأیید سربازرس" else "در انتظار بررسی"}", 11, false, muted).apply { setPadding(0, dp(6), 0, 0) })
+            box.addView(text("مشاهده جزئیات و بررسی  ←", 12, true, Color.rgb(150, 111, 43)).apply { setPadding(0, dp(9), 0, 0) })
+            panel.addView(box)
+            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+        }
+    }
+
+    private fun showSupervisorReport(report: JSONObject) {
+        if (!report.has("payload")) {
+            val id = report.optInt("id", 0)
+            val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست؛ دوباره وارد شوید"); return }
+            if (id <= 0) { notifyShort("شناسه گزارش نامعتبر است"); return }
+            work({ api.get("mobile_supervisor_report.php?submission_id=$id", sessionFor(device)) }) { detail -> showSupervisorReport(detail) }
+            return
+        }
+        activeTab = "supervisor"
+        selectedMission = null
+        val payload = report.optJSONObject("payload") ?: JSONObject()
+        val org = report.optString("org_name", "دستگاه اجرایی")
+        val inspector = report.optString("inspector_name", "بازرس")
+        val receipt = report.optString("receipt_code", "—")
+        val score = if (report.has("score") && !report.isNull("score")) String.format(Locale.US, "%.1f", report.optDouble("score")) else "—"
+        screen("بررسی گزارش بازرس", org, withNav = true)
+        val summary = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(15), dp(15), dp(15))
+            background = rounded(Color.WHITE, 16)
+        }
+        summary.addView(text(org, 18, true, navy))
+        summary.addView(text("نام بازرس: $inspector  •  کد پرسنلی: ${report.optString("inspector_ref", "—")}", 12, false, muted).apply { setPadding(0, dp(8), 0, 0) })
+        summary.addView(text("امتیاز نهایی بازرس: $score", 16, true, ink).apply { setPadding(0, dp(9), 0, 0) })
+        val submittedAt = report.optString("submitted_at", "").replace('T', ' ').take(19).ifBlank { "ثبت نشده" }
+        val evaluation = report.optJSONObject("evaluation") ?: payload.optJSONObject("evaluation") ?: JSONObject()
+        val coverage = if (evaluation.has("coverage_percent")) String.format(Locale.US, "%.0f%%", evaluation.optDouble("coverage_percent")) else "—"
+        val unscoredCount = evaluation.optJSONArray("unscored_question_ids")?.length() ?: 0
+        summary.addView(text("تاریخ ارسال: $submittedAt", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+        summary.addView(text("پوشش ارزیابی: $coverage  •  بندهای بدون امتیاز: $unscoredCount", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+        summary.addView(text("کد رسید: $receipt", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+        content.addView(summary)
+        gap(14)
+        sectionTitle("جزئیات چک‌لیست")
+        val snapshot = payload.optJSONObject("checklist_snapshot") ?: payload.optJSONObject("checklistSnapshot") ?: JSONObject()
+        val questions = snapshot.optJSONArray("questions") ?: JSONArray()
+        val answers = payload.optJSONObject("answers") ?: JSONObject()
+        val notes = payload.optJSONObject("notes") ?: JSONObject()
+        if (questions.length() == 0) {
+            emptyState("جزئیات بندها در گزارش موجود نیست", "خلاصه گزارش و امتیاز ثبت‌شده در دسترس است.")
+        } else {
+            for (index in 0 until questions.length()) {
+                val question = questions.optJSONObject(index) ?: continue
+                val qid = question.optString("id", "")
+                val title = question.optString("text", question.optString("title", question.optString("question", "بند ارزیابی ${index + 1}")))
+                val rawAnswer = if (qid.isNotBlank()) answers.opt(qid) else null
+                val answer = when (rawAnswer) {
+                    null, JSONObject.NULL -> "بدون امتیاز"
+                    is JSONObject -> rawAnswer.optString("score", rawAnswer.optString("value", rawAnswer.toString()))
+                    else -> rawAnswer.toString()
+                }
+                val note = if (qid.isNotBlank()) notes.optString(qid, "") else ""
+                val panel = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(13), dp(12), dp(13), dp(12))
+                    background = rounded(Color.WHITE, 13)
+                }
+                panel.addView(text("${index + 1}. $title", 13, true, navy))
+                panel.addView(text("امتیاز ثبت‌شده: $answer", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+                if (note.isNotBlank()) panel.addView(text("توضیح بازرس: $note", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+            }
+        }
+        val findings = payload.optJSONArray("findings") ?: JSONArray()
+        if (findings.length() > 0) {
+            sectionTitle("نواقص و موارد ثبت‌شده (${findings.length()})")
+            for (index in 0 until findings.length()) {
+                val finding = findings.optJSONObject(index)
+                val findingText = if (finding != null) finding.optString("title", finding.optString("description", finding.optString("text", "مورد ثبت‌شده"))) else findings.optString(index)
+                val findingView = text("${index + 1}. $findingText", 12, false, ink).apply { setPadding(dp(12), dp(9), dp(12), dp(9)); background = rounded(Color.WHITE, 10) }
+                content.addView(findingView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            }
+        }
+        val uploads = report.optJSONArray("uploads") ?: JSONArray()
+        sectionTitle("مستندات و تصاویر (${uploads.length()})")
+        if (uploads.length() == 0) label("برای این گزارش مستندی ثبت نشده است.", 12, false, muted)
+        for (index in 0 until uploads.length()) {
+            val file = uploads.optJSONObject(index) ?: continue
+            val id = file.optInt("id", 0)
+            val name = file.optString("name", "مستند ${index + 1}")
+            val sizeKb = file.optLong("size", 0L) / 1024L
+            secondaryButton("مشاهده / دریافت: $name  (${sizeKb} KB)") { openSupervisorEvidence(id, name, file.optString("mime", "application/octet-stream")) }
+        }
+        gap(12)
+        val status = report.optString("review_status", "admin_review")
+        if (status == "admin_review" || status == "pending_review") {
+            button("تأیید گزارش توسط سربازرس") {
+                AlertDialog.Builder(this).setTitle("تأیید گزارش")
+                    .setMessage("گزارش این بازرس تأیید شود و برای تأیید نهایی به مدیریت ارسال شود؟")
+                    .setNegativeButton("انصراف", null)
+                    .setPositiveButton("تأیید و ارجاع به مدیریت") { _, _ -> submitSupervisorDecision(report, "approve", "") }
+                    .show()
+            }
+            secondaryButton("بازگشت برای اصلاح") {
+                val reason = EditText(this).apply {
+                    hint = "دلیل بازگشت برای بازرس"
+                    minLines = 3
+                    maxLines = 5
+                    gravity = Gravity.TOP or Gravity.RIGHT
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                }
+                AlertDialog.Builder(this).setTitle("بازگشت گزارش برای اصلاح")
+                    .setView(reason)
+                    .setNegativeButton("انصراف", null)
+                    .setPositiveButton("ثبت بازگشت") { _, _ ->
+                        val note = reason.text?.toString()?.trim().orEmpty()
+                        if (note.isBlank()) notifyShort("نوشتن دلیل بازگشت الزامی است")
+                        else submitSupervisorDecision(report, "return", note)
+                    }.show()
+            }
+        } else {
+            label("این گزارش دیگر در صف بررسی سربازرس نیست.", 12, false, muted)
+        }
+        secondaryButton("بازگشت به کارتابل سربازرس") { showHome("supervisor") }
+    }
+
+    private fun submitSupervisorDecision(report: JSONObject, action: String, note: String) {
+        val id = report.optInt("id", 0)
+        val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست؛ دوباره وارد شوید"); return }
+        if (id <= 0) { notifyShort("شناسه گزارش نامعتبر است"); return }
+        work({
+            val session = sessionFor(device)
+            val result = api.post("mobile_supervisor_action.php", JSONObject()
+                .put("submission_id", id).put("action", action).put("note", note), session)
+            if (!result.optBoolean("ok", false)) throw UserActionException("پاسخ تأیید سربازرس از سرور معتبر نبود")
+            val inbox = try { api.get("mobile_supervisor_inbox.php", session) } catch (_: Exception) { null }
+            Pair(result, inbox)
+        }) { (_, inbox) ->
+            if (inbox != null) {
+                serverSnapshot.put("supervisor", inbox)
+            } else {
+                val old = serverSnapshot.optJSONObject("supervisor") ?: JSONObject()
+                val oldItems = old.optJSONArray("items") ?: JSONArray()
+                val kept = JSONArray()
+                for (index in 0 until oldItems.length()) {
+                    val item = oldItems.optJSONObject(index) ?: continue
+                    if (item.optInt("id", 0) != id) kept.put(item)
+                }
+                old.put("items", kept).put("count", kept.length())
+                serverSnapshot.put("supervisor", old)
+            }
+            store.save("mobile_sync", serverSnapshot.toString())
+            showHome("supervisor")
+            notifyShort(if (action == "approve") "گزارش تأیید شد و برای مدیریت ارسال شد" else "گزارش برای اصلاح به بازرس برگشت داده شد")
+        }
+    }
+
+    private fun refreshSupervisorInbox() {
+        val device = deviceToken ?: run { notifyShort("ابتدا وارد حساب شوید"); return }
+        work({
+            val session = sessionFor(device)
+            api.get("mobile_supervisor_inbox.php", session)
+        }) { inbox ->
+            serverSnapshot.put("supervisor", inbox)
+            store.save("mobile_sync", serverSnapshot.toString())
+            showHome("supervisor")
+        }
+    }
+
+    private fun openSupervisorEvidence(uploadId: Int, displayName: String, mimeHint: String) {
+        val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست"); return }
+        if (uploadId <= 0) { notifyShort("شناسه مستند نامعتبر است"); return }
+        work({
+            val session = sessionFor(device)
+            val (bytes, downloadedMime) = api.downloadSupervisorEvidence(uploadId, session)
+            val mime = if (downloadedMime == "application/octet-stream" && mimeHint.isNotBlank()) mimeHint else downloadedMime
+            val dir = File(cacheDir, "supervisor_evidence").apply { mkdirs() }
+            val ext = when (mime) {
+                "image/jpeg" -> ".jpg"
+                "image/png" -> ".png"
+                "image/webp" -> ".webp"
+                "application/pdf" -> ".pdf"
+                else -> ".bin"
+            }
+            val file = File(dir, "evidence-$uploadId$ext")
+            file.writeBytes(bytes)
+            Pair(file, mime)
+        }) { (file, mime) ->
+            try {
+                val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(intent)
+            } catch (_: Exception) {
+                notifyShort("برای باز کردن این نوع فایل، برنامه نمایشگر سازگار روی گوشی لازم است")
+            }
         }
     }
 
@@ -1931,9 +2194,10 @@ class MainActivity : AppCompatActivity() {
             inner.addView(text("شماره رسید: ${report.optString("receipt_code", "ثبت‌شده")}", 13, false, ink))
             inner.addView(text("تاریخ: ${report.optString("submitted_at", "نامشخص")}", 12, false, muted))
             val status = when (report.optString("review_status")) {
-                "approved", "accepted" -> "بررسی مدیر: تأیید شده"
-                "rejected", "returned" -> "بررسی مدیر: نیازمند اصلاح"
-                "pending_review" -> "بررسی مدیر: در انتظار بررسی"
+                "approved", "accepted" -> "تأیید نهایی مدیریت ثبت شده"
+                "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                "admin_review", "pending_review" -> "در انتظار تأیید سربازرس"
+                "rejected", "returned" -> "برای اصلاح به بازرس برگشت داده شد"
                 else -> if (fromServer) "وضعیت بررسی ثبت نشده" else "رسید ذخیره‌شده محلی"
             }
             inner.addView(text(status, 12, true, teal))
@@ -1956,9 +2220,9 @@ class MainActivity : AppCompatActivity() {
         label("کد رسید: ${report.optString("receipt_code", "ثبت‌شده")}", 15, true, teal)
         label("تاریخ ثبت: ${report.optString("submitted_at", "نامشخص")}", 13, false, muted)
         if (fromServer) {
-            label("وضعیت بررسی: ${report.optString("review_status", "نامشخص")}", 14, true, navy)
+            label("وضعیت گردش تأیید: ${when(report.optString("review_status")){"admin_review","pending_review"->"در انتظار سربازرس";"supervisor_approved"->"تأیید سربازرس؛ در انتظار مدیریت";"approved","accepted"->"تأیید نهایی مدیریت";"returned","rejected"->"بازگشت برای اصلاح";else->"نامشخص"}}", 14, true, navy)
             report.optString("review_note").takeIf { it.isNotBlank() }?.let {
-                label("نظر مدیر: $it", 13, false, ink)
+                label("یادداشت بررسی: $it", 13, false, ink)
             }
         }
         val key = report.optString("mission_key")

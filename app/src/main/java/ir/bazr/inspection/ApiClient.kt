@@ -45,6 +45,41 @@ class ApiClient(private val base: String) {
 
     fun get(path: String, bearer: String): JSONObject = read(open(path, "GET", bearer))
 
+    /** Secure evidence download for the assigned mobile supervisor review inbox. */
+    fun downloadSupervisorEvidence(uploadId: Int, bearer: String): Pair<ByteArray, String> {
+        require(uploadId > 0)
+        val conn = (URL(base + "mobile_supervisor_file.php?upload_id=$uploadId")
+            .openConnection() as HttpURLConnection)
+        try {
+            conn.requestMethod = "GET"
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 45_000
+            conn.setRequestProperty("Authorization", "Bearer $bearer")
+            conn.setRequestProperty("Accept", "image/*,application/pdf,application/octet-stream")
+            if (conn.responseCode != 200) throw ApiException(conn.responseCode, "supervisor_evidence_unavailable", "")
+            val mime = conn.contentType.orEmpty().substringBefore(';').ifBlank { "application/octet-stream" }
+            if (!(mime.startsWith("image/") || mime == "application/pdf" || mime == "application/octet-stream")) {
+                throw UserActionException("نوع فایل پیوست پشتیبانی نمی‌شود")
+            }
+            val declared = conn.contentLengthLong
+            if (declared > 12L * 1024 * 1024) throw UserActionException("حجم مستند بیش از حد مجاز است")
+            val out = ByteArrayOutputStream()
+            conn.inputStream.use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (out.size() + read > 12 * 1024 * 1024) throw UserActionException("حجم مستند بیش از حد مجاز است")
+                    out.write(buffer, 0, read)
+                }
+            }
+            val bytes = out.toByteArray()
+            if (bytes.isEmpty()) throw UserActionException("فایل پیوست خالی است")
+            return Pair(bytes, mime)
+        } finally { conn.disconnect() }
+    }
+
     /** PDF is downloaded as binary from an authenticated, fixed endpoint (never an arbitrary URL). */
     fun downloadOfficialPdf(submissionId: Int, kind: String, bearer: String): ByteArray {
         require(submissionId > 0 && kind in setOf("summary", "detailed"))
@@ -81,7 +116,7 @@ class ApiClient(private val base: String) {
     }
 
     private fun open(path: String, method: String, bearer: String?): HttpURLConnection {
-        require(path.matches(Regex("[A-Za-z0-9_/-]+\\.php")))
+        require(path.matches(Regex("[A-Za-z0-9_/-]+\\.php(?:\\?[A-Za-z0-9_=&.-]+)?")))
         val url = URL(base + path)
         val conn = (url.openConnection() as HttpURLConnection)
         conn.instanceFollowRedirects = false
