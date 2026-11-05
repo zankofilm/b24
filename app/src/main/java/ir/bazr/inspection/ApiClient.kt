@@ -135,6 +135,9 @@ class ApiClient(private val base: String) {
         onProgress: ((Long, Long) -> Unit)? = null,
     ): JSONObject {
         if (bytes.isEmpty() || bytes.size > 12 * 1024 * 1024) throw UserActionException("حجم مستند نامعتبر است")
+        if (mime.startsWith("image/") && bytes.size > PhotoUploadPolicy.TARGET_BYTES) {
+            throw UserActionException("حجم عکس ارسالی باید حداکثر ۲۰۰ کیلوبایت باشد؛ عکس دوباره بهینه‌سازی شود")
+        }
         if (mime !in setOf("image/jpeg", "image/png", "image/webp", "application/pdf")) {
             throw UserActionException("نوع فایل پشتیبانی نمی‌شود")
         }

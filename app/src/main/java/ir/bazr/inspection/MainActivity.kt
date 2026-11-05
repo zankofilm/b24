@@ -162,11 +162,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private data class ImportedEvidenceResult(
+        val reference: String,
+        val originalBytes: Int,
+        val isImage: Boolean,
+        val uploadBytes: Int? = null,
+        val optimizationWarning: String? = null
+    )
+
     private fun importEvidence(uri: Uri, question: String, camera: Boolean, temporary: File? = null) {
         work({
-            try { evidenceVault.importUri(contentResolver, uri, camera) }
-            finally { temporary?.delete() }
-        }) { reference ->
+            var importedReference: String? = null
+            try {
+                val reference = evidenceVault.importUri(contentResolver, uri, camera)
+                importedReference = reference
+                val original = evidenceVault.read(reference, contentResolver)
+                if (original.mime.startsWith("image/") && original.bytes.size > PhotoUploadPolicy.TARGET_BYTES) {
+                    try {
+                        val prepared = PhotoUploadOptimizer.prepare(original)
+                        if (prepared.optimized) {
+                            val cacheWarning = try {
+                                evidenceVault.savePrepared(reference, prepared)
+                                null
+                            } catch (error: Exception) {
+                                error.message ?: "ذخیره نسخه فشرده در حافظه امن انجام نشد"
+                            }
+                            ImportedEvidenceResult(
+                                reference,
+                                original.bytes.size,
+                                true,
+                                prepared.bytes.size,
+                                cacheWarning
+                            )
+                        } else {
+                            ImportedEvidenceResult(reference, original.bytes.size, true)
+                        }
+                    } catch (error: Exception) {
+                        // Keep the original encrypted attachment even when the 200 KiB
+                        // transport copy cannot be made without harming legibility.
+                        ImportedEvidenceResult(
+                            reference,
+                            original.bytes.size,
+                            true,
+                            null,
+                            error.message ?: "بهینه‌سازی عکس انجام نشد"
+                        )
+                    }
+                } else {
+                    ImportedEvidenceResult(reference, original.bytes.size, original.mime.startsWith("image/"))
+                }
+            } catch (error: Exception) {
+                importedReference?.let { evidenceVault.delete(it) }
+                throw error
+            } finally {
+                temporary?.delete()
+            }
+        }) { result ->
+            val reference = result.reference
             val draft = openDraft
             if (draft == null || selectedMission == null || outbox.get(draft.key) != null) {
                 evidenceVault.delete(reference)
@@ -178,7 +230,14 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     draft.save()
                     selectedMission?.let { showMission(it, currentQuestionIndex) }
-                    notifyShort("مستند جدید به گاوصندوق رمزنگاری‌شده افزوده شد")
+                    val message = when {
+                        !result.isImage -> "مستند به‌صورت رمزنگاری‌شده ذخیره شد؛ PDF بدون تغییر می‌ماند"
+                        result.uploadBytes != null -> "عکس بهینه شد: ${(result.originalBytes + 1023) / 1024} ← ${(result.uploadBytes + 1023) / 1024} کیلوبایت؛ اصل عکس امن حفظ شد"
+                        result.optimizationWarning != null -> "عکس ذخیره شد، اما رسیدن به ۲۰۰ کیلوبایت با حفظ خوانایی ممکن نشد؛ نسخه اصلی محفوظ است"
+                        result.originalBytes > PhotoUploadPolicy.TARGET_BYTES -> "عکس ذخیره شد؛ فشرده‌سازی نهایی هنگام ارسال دوباره بررسی می‌شود"
+                        else -> "عکس زیر سقف ۲۰۰ کیلوبایت بود و بدون تغییر ذخیره شد"
+                    }
+                    notifyShort(message)
                 }
             }
         }
@@ -200,6 +259,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun chooseEvidence(question: String) {
         AlertDialog.Builder(this).setTitle("افزودن مستند بازرسی")
+            .setMessage("عکس‌های بیشتر از ۲۰۰ کیلوبایت هنگام افزودن بهینه می‌شوند. نسخه اصلی با رمزنگاری در گوشی حفظ می‌شود و فقط نسخه کم‌حجم برای ارسال استفاده می‌شود. فایل‌های PDF بدون تغییر می‌مانند.")
             .setItems(arrayOf("ثبت عکس با دوربین", "انتخاب عکس یا PDF از گوشی")) { _, which ->
                 if (which == 0) launchCamera(question)
                 else {
@@ -1163,44 +1223,113 @@ class MainActivity : AppCompatActivity() {
                     radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line
                     cardElevation = 0f; setCardBackgroundColor(Color.WHITE)
                 }
-                val bannerBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
+                val bannerBody = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(15), dp(14), dp(15), dp(14))
+                }
                 bannerBody.addView(text(modeLabel, 14, true, navy))
                 bannerBody.addView(text("${orgs.length()} اداره در آخرین همگام‌سازی برای شما مجاز بوده است.", 12, false, muted))
-                banner.addView(bannerBody); content.addView(banner)
+                banner.addView(bannerBody)
+                content.addView(banner)
                 gap(10)
+
                 val search = field("جست‌وجوی نام اداره، کد یا گروه")
                 search.setSingleLine(true)
                 search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
                 search.compoundDrawablePadding = dp(8)
                 content.addView(search)
                 gap(8)
+
                 val count = text("", 12, false, muted)
                 content.addView(count)
                 val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                 content.addView(results)
+
+                // The previous implementation created a View/Card for every authorized
+                // organization at once. In "all" access mode this can be thousands of
+                // views and exhaust the Android UI heap. Render a bounded page instead.
+                val pageSize = 40
+                var visibleLimit = pageSize
+
                 fun renderDepartments() {
                     val query = search.text?.toString()?.trim().orEmpty()
-                    val filtered = (0 until orgs.length()).mapNotNull { orgs.optJSONObject(it) }.filter { org ->
-                        query.isBlank() || listOf(org.optString("name"), org.optString("code"), org.optString("comparisonGroup"), org.optString("category"))
-                            .any { it.contains(query, ignoreCase = true) }
-                    }
-                    count.text = "${filtered.size} اداره نمایش داده می‌شود"
                     results.removeAllViews()
-                    if (filtered.isEmpty()) {
-                        val empty = text(if (orgs.length() == 0) "هنوز اداره‌ای برای شما مجاز نشده است." else "اداره‌ای با این جست‌وجو پیدا نشد.", 14, false, muted).apply {
-                            gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
+
+                    var matchedCount = 0
+                    var renderedCount = 0
+                    for (index in 0 until orgs.length()) {
+                        val org = orgs.optJSONObject(index) ?: continue
+                        val searchable = sequenceOf(
+                            "name", "organization_name", "orgName",
+                            "code", "organization_code", "id",
+                            "comparisonGroup", "comparison_group",
+                            "category", "group_name"
+                        ).map { key -> org.optString(key, "") }
+                            .filter { value -> value.isNotBlank() && value != "null" }
+
+                        val matches = query.isBlank() || searchable.any { value ->
+                            value.contains(query, ignoreCase = true)
+                        }
+                        if (!matches) continue
+
+                        matchedCount++
+                        if (matchedCount <= visibleLimit) {
+                            try {
+                                departmentItem(org, results)
+                                renderedCount++
+                            } catch (error: Exception) {
+                                android.util.Log.e(
+                                    "BAZR_Departments",
+                                    "Could not render authorized organization at index $index",
+                                    error
+                                )
+                            }
+                        }
+                    }
+
+                    count.text = if (matchedCount == 0) {
+                        "هیچ اداره‌ای برای نمایش پیدا نشد"
+                    } else {
+                        "$renderedCount از $matchedCount اداره نمایش داده می‌شود"
+                    }
+
+                    if (matchedCount == 0) {
+                        val message = if (orgs.length() == 0) {
+                            "هنوز اداره‌ای برای شما مجاز نشده است."
+                        } else {
+                            "اداره‌ای با این جست‌وجو پیدا نشد."
+                        }
+                        val empty = text(message, 14, false, muted).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(14), dp(26), dp(14), dp(26))
+                            background = rounded(Color.WHITE, 14)
                         }
                         results.addView(empty)
-                    } else filtered.forEach { departmentItem(it, results) }
+                    } else if (matchedCount > visibleLimit) {
+                        val nextCount = minOf(pageSize, matchedCount - visibleLimit)
+                        val more = makeButton("نمایش $nextCount اداره دیگر", false) {
+                            visibleLimit = minOf(matchedCount, visibleLimit + pageSize)
+                            renderDepartments()
+                        }
+                        results.addView(more)
+                    }
                 }
+
                 search.addTextChangedListener(object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderDepartments()
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        visibleLimit = pageSize
+                        renderDepartments()
+                    }
                     override fun afterTextChanged(s: Editable?) {}
                 })
+
                 renderDepartments()
                 gap(8)
-                label("تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.", 11, false, muted)
+                label(
+                    "تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.",
+                    11, false, muted
+                )
                 secondaryButton("همگام‌سازی دسترسی‌ها") {
                     if (deviceToken == null) notifyShort("ابتدا وارد حساب بازرس شوید") else connectAndSync()
                 }
@@ -2106,7 +2235,9 @@ class MainActivity : AppCompatActivity() {
                         // Transport-only optimization also covers photos in older saved drafts.
                         // The encrypted original remains untouched until server receipt.
                         val attachment = evidenceVault.read(reference, contentResolver)
-                        val prepared = PhotoUploadOptimizer.prepare(attachment)
+                        val prepared = evidenceVault.readPrepared(reference) ?: PhotoUploadOptimizer.prepare(attachment).also { candidate ->
+                            if (candidate.optimized) runCatching { evidenceVault.savePrepared(reference, candidate) }
+                        }
                         if (prepared.optimized) {
                             updateTransferProgress(scope,
                                 "بهینه‌سازی عکس $position از $documentCount: " +

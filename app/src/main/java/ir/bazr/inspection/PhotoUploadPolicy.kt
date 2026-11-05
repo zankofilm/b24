@@ -1,14 +1,24 @@
 package ir.bazr.inspection
 
 /**
- * A quality-first budget for mobile evidence photos. 200 KB is a target, not a
- * justification to make the text on a photographed document unreadable.
- * PDFs and signatures are deliberately excluded from image optimization.
+ * Upload budget for photographic evidence. The original is always retained in
+ * the encrypted vault; this policy applies only to the transport copy.
  */
 object PhotoUploadPolicy {
-    const val TARGET_BYTES: Int = 200_000
-    val MAX_EDGES: List<Int> = listOf(2048, 1792, 1600, 1440, 1280)
-    val WEBP_QUALITIES: List<Int> = listOf(94, 90, 86, 82)
+    // 200 KiB (204,800 bytes), rather than decimal 200,000 bytes.
+    const val TARGET_BYTES: Int = 200 * 1024
+
+    // Longest edge, descending. Keep enough pixels for inspection evidence while
+    // allowing high-resolution phone photos to fit the transport budget.
+    val MAX_EDGES: List<Int> = listOf(
+        2560, 2304, 2048, 1920, 1792, 1664, 1536, 1408,
+        1280, 1152, 1024, 960, 896, 832, 768, 704, 640
+    )
+
+    // The encoder probes these quality levels and then binary-searches the
+    // interval where the best candidate first fits the byte budget.
+    val QUALITY_PROBES: List<Int> = listOf(96, 90, 84, 78, 72, 66, 60)
+    const val MIN_QUALITY: Int = 60
 
     fun needsOptimization(mime: String, size: Int): Boolean =
         mime.startsWith("image/") && size > TARGET_BYTES
@@ -18,7 +28,9 @@ object PhotoUploadPolicy {
         val sourceEdge = maxOf(width, height)
         if (sourceEdge <= maxEdge) return Pair(width, height)
         val factor = maxEdge.toDouble() / sourceEdge
-        return Pair((width * factor).toInt().coerceAtLeast(1),
-            (height * factor).toInt().coerceAtLeast(1))
+        return Pair(
+            (width * factor).toInt().coerceAtLeast(1),
+            (height * factor).toInt().coerceAtLeast(1)
+        )
     }
 }
