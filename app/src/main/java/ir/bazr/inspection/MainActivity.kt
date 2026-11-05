@@ -1215,8 +1215,7 @@ class MainActivity : AppCompatActivity() {
         gap(12)
         secondaryButton("به‌روزرسانی کارتابل") { refreshSupervisorInbox() }
         if (items.length() == 0) {
-            emptyState("گزارش منتظر بررسی ندارید", "گزارش‌های جدید پس از ارسال بازرس در همین قسمت نمایش داده می‌شوند.")
-            return
+            emptyState("گزارش منتظر بررسی ندارید", "در حال حاضر گزارشی برای تأیید سربازرس وجود ندارد.")
         }
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -1247,6 +1246,48 @@ class MainActivity : AppCompatActivity() {
             box.addView(text("مشاهده جزئیات و بررسی  ←", 12, true, Color.rgb(150, 111, 43)).apply { setPadding(0, dp(9), 0, 0) })
             panel.addView(box)
             content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+        }
+
+        val history = supervisor.optJSONArray("history") ?: JSONArray()
+        if (history.length() > 0) {
+            gap(10)
+            sectionTitle("سوابق گزارش‌ها (${history.length()})")
+            label("گزارش‌های قبلاً بررسی‌شده در این بخش فقط برای مشاهده هستند.", 11, false, muted)
+            for (index in 0 until history.length()) {
+                val item = history.optJSONObject(index) ?: continue
+                val org = item.optString("org_name", "دستگاه اجرایی")
+                val inspector = item.optString("inspector_name", "بازرس")
+                val receipt = item.optString("receipt_code", "—")
+                val statusText = when (item.optString("review_status")) {
+                    "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                    "approved", "accepted" -> "تأیید نهایی مدیریت"
+                    "returned", "rejected" -> "بازگشت برای اصلاح"
+                    else -> "بررسی‌شده"
+                }
+                val panel = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat()
+                    strokeWidth = dp(1)
+                    strokeColor = line
+                    cardElevation = dp(1).toFloat()
+                    setCardBackgroundColor(Color.WHITE)
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { showSupervisorReport(item) }
+                }
+                val box = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                }
+                box.addView(text(org, 15, true, navy))
+                box.addView(text("بازرس: $inspector", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                box.addView(text("وضعیت: $statusText", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+                box.addView(text("رسید: $receipt  •  مشاهده جزئیات ←", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                panel.addView(box)
+                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) })
+            }
+        } else if (items.length() == 0) {
+            gap(8)
+            emptyState("سابقه‌ای برای نمایش وجود ندارد", "گزارش‌های جدید پس از ارسال بازرس در این کارتابل ثبت می‌شوند.")
         }
     }
 
@@ -1361,7 +1402,17 @@ class MainActivity : AppCompatActivity() {
                     }.show()
             }
         } else {
-            label("این گزارش دیگر در صف بررسی سربازرس نیست.", 12, false, muted)
+            val statusLabel = when (status) {
+                "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                "approved", "accepted" -> "تأیید نهایی مدیریت"
+                "returned", "rejected" -> "بازگشت برای اصلاح"
+                else -> "خارج از صف بررسی"
+            }
+            label("وضعیت گزارش: $statusLabel. این گزارش در حالت فقط‌خواندنی است.", 12, false, muted)
+            val reviewer = report.optString("reviewed_by", "")
+            if (reviewer.isNotBlank()) label("ثبت‌کننده آخرین بررسی: $reviewer", 11, false, muted)
+            val reviewNote = report.optString("review_note", "")
+            if (reviewNote.isNotBlank()) label("توضیح بررسی: $reviewNote", 12, false, ink)
         }
         secondaryButton("بازگشت به کارتابل سربازرس") { showHome("supervisor") }
     }
