@@ -1786,7 +1786,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 val safeError = "مرحله: $currentStage\n" + AppErrorMessages.forUser(e)
                 outbox.setState(key, "failed", safeError)
-                updateTransferProgress(scope, "ارسال ناموفق؛ داده‌ها و امضا حفظ شدند", safeError.take(600), 0)
+                updateTransferProgress(scope, "ارسال ناموفق؛ داده‌ها و امضا حفظ شدند\n${safeError.take(600)}", 0)
                 Pair(null as JSONObject?, e)
             }
         }) { result ->
