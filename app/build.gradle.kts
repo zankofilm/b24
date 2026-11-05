@@ -14,8 +14,8 @@ android {
         applicationId = "ir.bazr.inspection"
         minSdk = 30
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.9.2-native-optional-scores"
+        versionCode = 12
+        versionName = "4.8.1-native-upload-progress"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     buildFeatures { buildConfig = true }
