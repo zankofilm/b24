@@ -1,8 +1,12 @@
-# سامانه بازرسی ادارات — Android Native 4.13.1
+# سامانه بازرسی ادارات — Android Native 4.13.2
 
 این مخزن سورس اپلیکیشن بومی اندروید بازرس است. رابط کاربری با Kotlin و Viewهای Native ساخته شده و از WebView استفاده نمی‌کند.
 
-## تغییرات نسخه 4.13.1
+## تغییرات نسخه 4.13.2 و اصلاحات قبلی 4.13.1
+
+- رفع خطای کامپایل Kotlin در تنظیم نوارهای سیستم با جایگزینی property syntax ناسازگار با فراخوانی مستقیم `Window.setStatusBarContrastEnforced(false)` و `Window.setNavigationBarContrastEnforced(false)`؛ این متدها در Android API 29 اضافه شده‌اند و حداقل SDK پروژه API 30 است.
+- افزایش `versionCode` از 23 به 24 و `versionName` از 4.13.1 به 4.13.2.
+- اصلاح نام Artifact در GitHub Actions به `bazr-inspector-4.13.2-apk`.
 
 - اصلاح ورود بیومتریک و پاک‌سازی کلید Keystore نامعتبر پس از تغییر اثر انگشت.
 - حذف شناسه فعال‌سازی پس از تأیید دستگاه و خروج امن از حساب.

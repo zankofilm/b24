@@ -351,8 +351,12 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        window.statusBarContrastEnforced = false
-        window.navigationBarContrastEnforced = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Use the Java setters explicitly; Kotlin synthetic property resolution
+            // differs for Window's isX()/setX() boolean accessors.
+            window.setStatusBarContrastEnforced(false)
+            window.setNavigationBarContrastEnforced(false)
+        }
         val baseLeft = root.paddingLeft
         val baseTop = root.paddingTop
         val baseRight = root.paddingRight
@@ -379,8 +383,12 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        window.statusBarContrastEnforced = false
-        window.navigationBarContrastEnforced = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Use the Java setters explicitly; Kotlin synthetic property resolution
+            // differs for Window's isX()/setX() boolean accessors.
+            window.setStatusBarContrastEnforced(false)
+            window.setNavigationBarContrastEnforced(false)
+        }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
