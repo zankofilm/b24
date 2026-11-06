@@ -107,6 +107,7 @@ class MainActivity : AppCompatActivity() {
     private var loadingBar: LinearProgressIndicator? = null
     private var activeTab = "home"
     private var currentQuestionIndex = 0
+    private var currentSectionIndex = 0
     /** Non-certified PDF data is kept in memory only while the system file picker is open. */
     private var pendingPdfExport: JSONObject? = null
     private val pdfFilePicker = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -162,63 +163,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private data class ImportedEvidenceResult(
-        val reference: String,
-        val originalBytes: Int,
-        val isImage: Boolean,
-        val uploadBytes: Int? = null,
-        val optimizationWarning: String? = null
-    )
-
     private fun importEvidence(uri: Uri, question: String, camera: Boolean, temporary: File? = null) {
         work({
-            var importedReference: String? = null
-            try {
-                val reference = evidenceVault.importUri(contentResolver, uri, camera)
-                importedReference = reference
-                val original = evidenceVault.read(reference, contentResolver)
-                if (original.mime.startsWith("image/") && original.bytes.size > PhotoUploadPolicy.TARGET_BYTES) {
-                    try {
-                        val prepared = PhotoUploadOptimizer.prepare(original)
-                        if (prepared.optimized) {
-                            val cacheWarning = try {
-                                evidenceVault.savePrepared(reference, prepared)
-                                null
-                            } catch (error: Exception) {
-                                error.message ?: "ذخیره نسخه فشرده در حافظه امن انجام نشد"
-                            }
-                            ImportedEvidenceResult(
-                                reference,
-                                original.bytes.size,
-                                true,
-                                prepared.bytes.size,
-                                cacheWarning
-                            )
-                        } else {
-                            ImportedEvidenceResult(reference, original.bytes.size, true)
-                        }
-                    } catch (error: Exception) {
-                        // Keep the original encrypted attachment even when the 200 KiB
-                        // transport copy cannot be made without harming legibility.
-                        ImportedEvidenceResult(
-                            reference,
-                            original.bytes.size,
-                            true,
-                            null,
-                            error.message ?: "بهینه‌سازی عکس انجام نشد"
-                        )
-                    }
-                } else {
-                    ImportedEvidenceResult(reference, original.bytes.size, original.mime.startsWith("image/"))
-                }
-            } catch (error: Exception) {
-                importedReference?.let { evidenceVault.delete(it) }
-                throw error
-            } finally {
-                temporary?.delete()
-            }
-        }) { result ->
-            val reference = result.reference
+            try { evidenceVault.importUri(contentResolver, uri, camera) }
+            finally { temporary?.delete() }
+        }) { reference ->
             val draft = openDraft
             if (draft == null || selectedMission == null || outbox.get(draft.key) != null) {
                 evidenceVault.delete(reference)
@@ -230,14 +179,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     draft.save()
                     selectedMission?.let { showMission(it, currentQuestionIndex) }
-                    val message = when {
-                        !result.isImage -> "مستند به‌صورت رمزنگاری‌شده ذخیره شد؛ PDF بدون تغییر می‌ماند"
-                        result.uploadBytes != null -> "عکس بهینه شد: ${(result.originalBytes + 1023) / 1024} ← ${(result.uploadBytes + 1023) / 1024} کیلوبایت؛ اصل عکس امن حفظ شد"
-                        result.optimizationWarning != null -> "عکس ذخیره شد، اما رسیدن به ۲۰۰ کیلوبایت با حفظ خوانایی ممکن نشد؛ نسخه اصلی محفوظ است"
-                        result.originalBytes > PhotoUploadPolicy.TARGET_BYTES -> "عکس ذخیره شد؛ فشرده‌سازی نهایی هنگام ارسال دوباره بررسی می‌شود"
-                        else -> "عکس زیر سقف ۲۰۰ کیلوبایت بود و بدون تغییر ذخیره شد"
-                    }
-                    notifyShort(message)
+                    notifyShort("مستند جدید به گاوصندوق رمزنگاری‌شده افزوده شد")
                 }
             }
         }
@@ -257,16 +199,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Launch Android's real file picker, not an instructional pop-up. */
+    private fun launchEvidencePicker(question: String) {
+        if (question.isBlank()) { notifyShort("شناسه سؤال نامعتبر است"); return }
+        store.save("pending_picker_question", question)
+        try {
+            evidencePicker.launch(arrayOf("image/*", "application/pdf"))
+        } catch (error: Exception) {
+            store.clear("pending_picker_question")
+            AlertDialog.Builder(this)
+                .setTitle("باز کردن گالری ناموفق بود")
+                .setMessage("در این گوشی برنامه انتخاب فایل در دسترس نیست. لطفاً یک گالری یا فایل‌منیجر نصب یا فعال کنید.")
+                .setPositiveButton("متوجه شدم", null).show()
+        }
+    }
+
+    /** Short native action sheet; a 200 KB warning must never replace picker actions. */
     private fun chooseEvidence(question: String) {
-        AlertDialog.Builder(this).setTitle("افزودن مستند بازرسی")
-            .setMessage("عکس‌های بیشتر از ۲۰۰ کیلوبایت هنگام افزودن بهینه می‌شوند. نسخه اصلی با رمزنگاری در گوشی حفظ می‌شود و فقط نسخه کم‌حجم برای ارسال استفاده می‌شود. فایل‌های PDF بدون تغییر می‌مانند.")
-            .setItems(arrayOf("ثبت عکس با دوربین", "انتخاب عکس یا PDF از گوشی")) { _, which ->
-                if (which == 0) launchCamera(question)
-                else {
-                    store.save("pending_picker_question", question)
-                    evidencePicker.launch(arrayOf("image/jpeg", "image/png", "image/webp", "application/pdf"))
-                }
-            }.show()
+        AlertDialog.Builder(this).setTitle("ثبت مستند بازرسی")
+            .setItems(arrayOf("عکس‌برداری با دوربین", "انتخاب تصویر یا PDF از گوشی")) { _, which ->
+                if (which == 0) launchCamera(question) else launchEvidencePicker(question)
+            }.setNegativeButton("انصراف", null).show()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1223,113 +1176,44 @@ class MainActivity : AppCompatActivity() {
                     radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line
                     cardElevation = 0f; setCardBackgroundColor(Color.WHITE)
                 }
-                val bannerBody = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(15), dp(14), dp(15), dp(14))
-                }
+                val bannerBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
                 bannerBody.addView(text(modeLabel, 14, true, navy))
                 bannerBody.addView(text("${orgs.length()} اداره در آخرین همگام‌سازی برای شما مجاز بوده است.", 12, false, muted))
-                banner.addView(bannerBody)
-                content.addView(banner)
+                banner.addView(bannerBody); content.addView(banner)
                 gap(10)
-
                 val search = field("جست‌وجوی نام اداره، کد یا گروه")
                 search.setSingleLine(true)
                 search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
                 search.compoundDrawablePadding = dp(8)
                 content.addView(search)
                 gap(8)
-
                 val count = text("", 12, false, muted)
                 content.addView(count)
                 val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                 content.addView(results)
-
-                // The previous implementation created a View/Card for every authorized
-                // organization at once. In "all" access mode this can be thousands of
-                // views and exhaust the Android UI heap. Render a bounded page instead.
-                val pageSize = 40
-                var visibleLimit = pageSize
-
                 fun renderDepartments() {
                     val query = search.text?.toString()?.trim().orEmpty()
+                    val filtered = (0 until orgs.length()).mapNotNull { orgs.optJSONObject(it) }.filter { org ->
+                        query.isBlank() || listOf(org.optString("name"), org.optString("code"), org.optString("comparisonGroup"), org.optString("category"))
+                            .any { it.contains(query, ignoreCase = true) }
+                    }
+                    count.text = "${filtered.size} اداره نمایش داده می‌شود"
                     results.removeAllViews()
-
-                    var matchedCount = 0
-                    var renderedCount = 0
-                    for (index in 0 until orgs.length()) {
-                        val org = orgs.optJSONObject(index) ?: continue
-                        val searchable = sequenceOf(
-                            "name", "organization_name", "orgName",
-                            "code", "organization_code", "id",
-                            "comparisonGroup", "comparison_group",
-                            "category", "group_name"
-                        ).map { key -> org.optString(key, "") }
-                            .filter { value -> value.isNotBlank() && value != "null" }
-
-                        val matches = query.isBlank() || searchable.any { value ->
-                            value.contains(query, ignoreCase = true)
-                        }
-                        if (!matches) continue
-
-                        matchedCount++
-                        if (matchedCount <= visibleLimit) {
-                            try {
-                                departmentItem(org, results)
-                                renderedCount++
-                            } catch (error: Exception) {
-                                android.util.Log.e(
-                                    "BAZR_Departments",
-                                    "Could not render authorized organization at index $index",
-                                    error
-                                )
-                            }
-                        }
-                    }
-
-                    count.text = if (matchedCount == 0) {
-                        "هیچ اداره‌ای برای نمایش پیدا نشد"
-                    } else {
-                        "$renderedCount از $matchedCount اداره نمایش داده می‌شود"
-                    }
-
-                    if (matchedCount == 0) {
-                        val message = if (orgs.length() == 0) {
-                            "هنوز اداره‌ای برای شما مجاز نشده است."
-                        } else {
-                            "اداره‌ای با این جست‌وجو پیدا نشد."
-                        }
-                        val empty = text(message, 14, false, muted).apply {
-                            gravity = Gravity.CENTER
-                            setPadding(dp(14), dp(26), dp(14), dp(26))
-                            background = rounded(Color.WHITE, 14)
+                    if (filtered.isEmpty()) {
+                        val empty = text(if (orgs.length() == 0) "هنوز اداره‌ای برای شما مجاز نشده است." else "اداره‌ای با این جست‌وجو پیدا نشد.", 14, false, muted).apply {
+                            gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
                         }
                         results.addView(empty)
-                    } else if (matchedCount > visibleLimit) {
-                        val nextCount = minOf(pageSize, matchedCount - visibleLimit)
-                        val more = makeButton("نمایش $nextCount اداره دیگر", false) {
-                            visibleLimit = minOf(matchedCount, visibleLimit + pageSize)
-                            renderDepartments()
-                        }
-                        results.addView(more)
-                    }
+                    } else filtered.forEach { departmentItem(it, results) }
                 }
-
                 search.addTextChangedListener(object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                        visibleLimit = pageSize
-                        renderDepartments()
-                    }
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderDepartments()
                     override fun afterTextChanged(s: Editable?) {}
                 })
-
                 renderDepartments()
                 gap(8)
-                label(
-                    "تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.",
-                    11, false, muted
-                )
+                label("تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.", 11, false, muted)
                 secondaryButton("همگام‌سازی دسترسی‌ها") {
                     if (deviceToken == null) notifyShort("ابتدا وارد حساب بازرس شوید") else connectAndSync()
                 }
@@ -1701,164 +1585,469 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private data class ChecklistSectionPage(
+        val id: String,
+        val title: String,
+        val category: String,
+        val questionIndices: List<Int>
+    )
+
+    /** One independent, vertically-scrollable page per checklist section (شاخص). */
     private fun showMission(mission: JSONObject, questionIndex: Int = 0) {
-        val key=missionKey(mission)
+        val key = missionKey(mission)
         if (key.isBlank()) { notifyShort("شناسه مأموریت نامعتبر است"); return }
         if (outbox.get(key) != null) {
             showOutbox()
             notifyShort("این گزارش در صف ارسال است؛ برای ویرایش، ابتدا از صف خارج کنید")
             return
         }
-        selectedMission=mission; selectedMissionKey=key
-        val draft=if(openDraft?.key == key) openDraft!! else InspectionDraft(key,store)
-        openDraft=draft
-        val enabled=mission.optBoolean("can_execute",false)
-        val questions=mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
-        val count=questions.length()
-        currentQuestionIndex=questionIndex.coerceIn(0,(count-1).coerceAtLeast(0))
+        selectedMission = mission
+        selectedMissionKey = key
+        val draft = if (openDraft?.key == key) openDraft!! else InspectionDraft(key, store)
+        openDraft = draft
+        val enabled = mission.optBoolean("can_execute", false)
+        val snapshot = mission.optJSONObject("checklistSnapshot") ?: JSONObject()
+        val questions = snapshot.optJSONArray("questions") ?: JSONArray()
+        val count = questions.length()
+        if (count == 0) {
+            screen("ثبت بازرسی", mission.optString("orgName", "دستگاه اجرایی"))
+            secondaryButton("بازگشت به مأموریت‌ها") { showHome("missions") }
+            emptyState("چک‌لیست خالی است", "برای دریافت اطلاعات جدید، مأموریت‌ها را همگام‌سازی کنید.")
+            return
+        }
+
+        // Build the page map from the authoritative snapshot. Question IDs and section IDs
+        // are never rewritten, so drafts, attachments, signatures and server scoring stay intact.
+        val sectionArray = snapshot.optJSONArray("sections") ?: JSONArray()
+        val pages = mutableListOf<ChecklistSectionPage>()
+        val assignedQuestionIndices = mutableSetOf<Int>()
+        if (sectionArray.length() == 0) {
+            // Backward compatibility for older snapshots that contain questions only.
+            pages.add(ChecklistSectionPage("__all__", "شاخص ارزیابی", "عمومی", (0 until count).toList()))
+        } else {
+            for (sectionIndex in 0 until sectionArray.length()) {
+                val section = sectionArray.optJSONObject(sectionIndex) ?: continue
+                val sectionId = section.optString("id").trim()
+                if (sectionId.isBlank()) continue
+                val indices = (0 until count).filter { qIndex ->
+                    questions.optJSONObject(qIndex)?.optString("sectionId") == sectionId
+                }
+                if (indices.isNotEmpty()) {
+                    pages.add(ChecklistSectionPage(
+                        sectionId,
+                        section.optString("title").ifBlank { section.optString("name").ifBlank { sectionId } },
+                        section.optString("category", "عمومی"),
+                        indices
+                    ))
+                    assignedQuestionIndices.addAll(indices)
+                }
+            }
+            val unassigned = (0 until count).filter { it !in assignedQuestionIndices }
+            if (unassigned.isNotEmpty()) {
+                pages.add(ChecklistSectionPage("__other__", "سایر موارد", "عمومی", unassigned))
+            }
+        }
+        if (pages.isEmpty()) {
+            pages.add(ChecklistSectionPage("__all__", "شاخص ارزیابی", "عمومی", (0 until count).toList()))
+        }
+
+        val requestedQuestionIndex = questionIndex.coerceIn(0, count - 1)
+        val resolvedPageIndex = pages.indexOfFirst { requestedQuestionIndex in it.questionIndices }
+            .takeIf { it >= 0 } ?: 0
+        currentSectionIndex = resolvedPageIndex
+        currentQuestionIndex = requestedQuestionIndex.takeIf { it in pages[resolvedPageIndex].questionIndices }
+            ?: pages[resolvedPageIndex].questionIndices.first()
+        val page = pages[currentSectionIndex]
+        val pageQuestionCount = page.questionIndices.size
+
         screen("ثبت بازرسی", mission.optString("orgName", "دستگاه اجرایی"))
         secondaryButton("بازگشت به مأموریت‌ها") { showHome("missions") }
-        val summary=LinearLayout(this).apply {
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(16),dp(14),dp(16),dp(14))
-            setBackground(rounded(Color.WHITE,16))
+
+        val summary = MaterialCardView(this).apply {
+            radius = dp(17).toFloat()
+            strokeWidth = dp(1)
+            strokeColor = line
+            cardElevation = 0f
+            setCardBackgroundColor(Color.WHITE)
         }
-        summary.addView(text(mission.optString("orgName", "بازرسی"),16,true,navy))
-        summary.addView(text(listOf(mission.optString("date"),mission.optString("schedule_label")).filter { it.isNotBlank() }.joinToString("  •  "),12,false,muted))
+        val summaryInside = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        summaryInside.addView(text(mission.optString("orgName", "دستگاه اجرایی"), 16, true, navy))
+        summaryInside.addView(text(
+            listOf(mission.optString("date"), mission.optString("schedule_label"))
+                .filter { it.isNotBlank() }.joinToString("  •  "), 12, false, muted
+        ))
+        summary.addView(summaryInside)
         content.addView(summary)
-        gap(14)
-        if (!enabled) label("این مأموریت فعلاً قابل ارسال نیست؛ امکان ثبت پیش‌نویس وجود دارد.",13,true,Color.rgb(157,99,29))
-        if (count == 0) {
-            emptyState("چک‌لیست خالی است","برای دریافت اطلاعات جدید، مأموریت‌ها را همگام‌سازی کنید.")
-            secondaryButton("بازگشت") { showHome("missions") }
-            return
+        gap(12)
+
+        if (!enabled) {
+            val schedule = mission.optString("schedule_label", "نامشخص")
+            val serverToday = mission.optString("server_today", "")
+            label("وضعیت مجوز مأموریت: $schedule" +
+                if (serverToday.isNotBlank()) " · تاریخ سرور: $serverToday" else "",
+                12, true, Color.rgb(157, 99, 29))
+            secondaryButton("به‌روزرسانی وضعیت و مجوز مأموریت") {
+                draft.save()
+                showHome("missions")
+                connectAndSync()
+            }
         }
-        val validAnswers = (0 until count).count { idx ->
-            val q=questions.optJSONObject(idx)
-            val number=draft.answers.optString(q?.optString("id") ?: "").toDoubleOrNull()
-            number != null && number in 0.0..100.0
+
+        val validAnswers = draft.answeredCount(mission)
+        val sectionAnswered = page.questionIndices.count { idx ->
+            val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
+            val value = draft.answers.optString(qid).toDoubleOrNull()
+            value != null && value.isFinite() && value in 0.0..100.0
         }
-        val stepTitle=label("سؤال ${currentQuestionIndex+1} از $count",15,true,navy)
-        val progressLabel=label("$validAnswers از $count سؤال امتیازدهی شده",12,false,muted)
-        val progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply {
-            max=count; this.progress=validAnswers
-            progressTintList=ColorStateList.valueOf(gold)
-            progressBackgroundTintList=ColorStateList.valueOf(line)
+
+        // Overall mission progress and current section progress are shown separately.
+        val progressCard = MaterialCardView(this).apply {
+            radius = dp(16).toFloat()
+            strokeWidth = dp(1)
+            strokeColor = line
+            cardElevation = 0f
+            setCardBackgroundColor(Color.WHITE)
         }
-        val progressParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(6))
-        progressParams.bottomMargin=dp(18)
-        content.addView(progress,progressParams)
-        val q=questions.optJSONObject(currentQuestionIndex) ?: JSONObject()
-        val id=q.optString("id")
-        if (id.isBlank()) {
-            label("شناسه سؤال نامعتبر است؛ اطلاعات چک‌لیست را با مدیر بررسی کنید.",14,true)
-            return
+        val progressInside = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(12), dp(15), dp(12))
         }
-        val questionText=q.optString("text",q.optString("question",q.optString("title",q.optString("label",id))))
-        val questionCard=LinearLayout(this).apply {
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(16),dp(20),dp(16),dp(18))
-            setBackground(rounded(Color.WHITE,18))
+        val overallLabel = text("پیشرفت کل مأموریت · $validAnswers از $count بند", 12, true, muted)
+        progressInside.addView(overallLabel)
+        val overallProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = count
+            progress = validAnswers
+            progressTintList = ColorStateList.valueOf(gold)
+            progressBackgroundTintList = ColorStateList.valueOf(line)
         }
-        questionCard.addView(text("عنوان سؤال",12,true,teal))
-        questionCard.addView(text(questionText,18,true,navy).apply { setPadding(0,dp(9),0,dp(4)) })
-        content.addView(questionCard)
-        gap(18)
-        label("امتیاز و مستندات",16,true,navy)
-        val score=field("امتیاز از ۰ تا ۱۰۰",draft.answers.optString(id),numeric=true)
-        val note=field("توضیح در صورت نیاز",draft.notes.optString(id))
+        progressInside.addView(overallProgress, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(7)
+        ).apply { topMargin = dp(7); bottomMargin = dp(10) })
+        val sectionLabel = text("این شاخص · $sectionAnswered از $pageQuestionCount آیتم پاسخ داده شده", 12, true, navy)
+        progressInside.addView(sectionLabel)
+        val sectionProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = pageQuestionCount
+            progress = sectionAnswered
+            progressTintList = ColorStateList.valueOf(Color.rgb(35, 153, 103))
+            progressBackgroundTintList = ColorStateList.valueOf(line)
+        }
+        progressInside.addView(sectionProgress, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(7)
+        ).apply { topMargin = dp(7) })
+        progressCard.addView(progressInside)
+        content.addView(progressCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(13) })
+
+        val sectionHero = MaterialCardView(this).apply {
+            radius = dp(20).toFloat()
+            strokeWidth = dp(1)
+            strokeColor = gold
+            cardElevation = dp(2).toFloat()
+            setCardBackgroundColor(navy)
+        }
+        val heroRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(16), dp(17), dp(16), dp(17))
+        }
+        val heroIcon = iconBadge(R.drawable.ic_building, 27)
+        heroRow.addView(heroIcon, LinearLayout.LayoutParams(dp(54), dp(54)).apply { marginStart = dp(12) })
+        val heroText = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        heroText.addView(text("شاخص ${currentSectionIndex + 1} از ${pages.size} · ${page.category}", 11, true, gold))
+        heroText.addView(text(page.title, 18, true, Color.WHITE).apply {
+            setPadding(0, dp(5), 0, dp(3))
+        })
+        heroText.addView(text("${pageQuestionCount} آیتم ارزیابی در این شاخص", 11, false, Color.rgb(220, 228, 237)))
+        heroRow.addView(heroText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val sectionNumber = TextView(this).apply {
+            text = String.format(Locale.US, "%02d", currentSectionIndex + 1)
+            textSize = 17f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(navy)
+            gravity = Gravity.CENTER
+            background = rounded(gold, 12)
+            setPadding(dp(11), dp(8), dp(11), dp(8))
+        }
+        heroRow.addView(sectionNumber)
+        sectionHero.addView(heroRow)
+        content.addView(sectionHero, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(15) })
+
         fun refreshProgress() {
-            val filled=(0 until count).count { idx ->
-                val qid=questions.optJSONObject(idx)?.optString("id") ?: ""
-                val value=draft.answers.optString(qid).toDoubleOrNull()
-                value != null && value in 0.0..100.0
+            val filledAll = draft.answeredCount(mission)
+            val filledSection = page.questionIndices.count { idx ->
+                val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
+                val value = draft.answers.optString(qid).toDoubleOrNull()
+                value != null && value.isFinite() && value in 0.0..100.0
             }
-            progress.progress=filled
-            progressLabel.text="$filled از $count سؤال امتیازدهی شده"
+            overallProgress.progress = filledAll
+            overallLabel.text = "پیشرفت کل مأموریت · $filledAll از $count بند"
+            sectionProgress.progress = filledSection
+            sectionLabel.text = "این شاخص · $filledSection از $pageQuestionCount آیتم پاسخ داده شده"
         }
-        score.addTextChangedListener(object: TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                draft.answers.put(id,s?.toString() ?: "")
-                draft.clearAcknowledgement()
-                draft.save(); refreshProgress()
+
+        fun addInput(
+            parent: LinearLayout,
+            hint: String,
+            initialValue: String,
+            numeric: Boolean,
+            multiline: Boolean,
+            onChanged: (String) -> Unit
+        ): EditText {
+            val wrapper = TextInputLayout(this).apply {
+                boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+                boxBackgroundColor = Color.WHITE
+                boxStrokeColor = gold
+                setBoxCornerRadii(dp(12).toFloat(), dp(12).toFloat(), dp(12).toFloat(), dp(12).toFloat())
+                this.hint = hint
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
             }
-            override fun afterTextChanged(s: Editable?) {}
-        })
-        note.addTextChangedListener(object: TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                draft.notes.put(id,s?.toString() ?: ""); draft.save()
-            }
-            override fun afterTextChanged(s: Editable?) {}
-        })
-        val attached = EvidenceRefs.references(draft.attachments, id)
-        if (attached.size < EvidenceRefs.MAX_PER_QUESTION) {
-            val evidenceAction = secondaryButton("افزودن مستند (${attached.size}/${EvidenceRefs.MAX_PER_QUESTION})") {
-                chooseEvidence(id)
-            }
-            evidenceAction.setIconResource(R.drawable.ic_camera)
-            evidenceAction.iconTint = ColorStateList.valueOf(navy)
-        } else label("سقف چهار مستند برای این سؤال تکمیل است.", 12, true, teal)
-        attached.forEachIndexed { index, reference ->
-            val panel = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(Color.WHITE, 12)
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-            }
-            panel.addView(text("مستند ${index + 1}: ${evidenceVault.metadata(reference)}", 12, false, ink))
-            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            actions.addView(makeButton("مشاهده مستند", false) { openAttachedEvidence(reference) },
-                LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(4) })
-            actions.addView(makeButton("حذف پیوست", false) {
-                AlertDialog.Builder(this)
-                    .setTitle("حذف مستند")
-                    .setMessage("فقط نسخه رمزنگاری‌شده این مستند از پیش‌نویس حذف می‌شود؛ فایل اصلی گوشی دست‌نخورده می‌ماند.")
-                    .setNegativeButton("انصراف", null)
-                    .setPositiveButton("حذف مستند") { _, _ ->
-                        if (EvidenceRefs.remove(draft.attachments, id, reference)) {
-                            draft.save()
-                            // Shared local references are retained if another question still uses them.
-                            if (reference !in EvidenceRefs.all(draft.attachments)) evidenceVault.delete(reference)
-                        }
-                        showMission(mission, currentQuestionIndex)
-                    }.show()
-            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(4) })
-            panel.addView(actions)
-            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
-        }
-        gap(13)
-        val nav=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        if (currentQuestionIndex > 0) {
-            val prev=makeButton("سؤال قبلی",false) { showMission(mission,currentQuestionIndex-1) }
-            nav.addView(prev,LinearLayout.LayoutParams(0,dp(52),1f).apply { marginEnd=dp(5) })
-        }
-        if (currentQuestionIndex < count-1) {
-            val next=makeButton("سؤال بعدی",true) { showMission(mission,currentQuestionIndex+1) }
-            nav.addView(next,LinearLayout.LayoutParams(0,dp(52),1f).apply { marginStart=dp(5) })
-        }
-        content.addView(nav)
-        if (currentQuestionIndex == count - 1 && validAnswers < count) {
-            gap(9)
-            secondaryButton("رفتن به اولین بند بدون امتیاز (اختیاری)") {
-                val firstMissing = (0 until count).firstOrNull { idx ->
-                    val questionId = questions.optJSONObject(idx)?.optString("id") ?: ""
-                    val value = draft.answers.optString(questionId).toDoubleOrNull()
-                    questionId.isBlank() || value == null || value !in 0.0..100.0
+            val input = TextInputEditText(this).apply {
+                setText(initialValue)
+                textSize = 15f
+                setTextColor(ink)
+                setHintTextColor(muted)
+                gravity = if (multiline) Gravity.TOP or Gravity.RIGHT else Gravity.RIGHT or Gravity.CENTER_VERTICAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                inputType = when {
+                    numeric -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                    multiline -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    else -> InputType.TYPE_CLASS_TEXT
                 }
-                if (firstMissing == null) notifyShort("امتیاز همه سؤال‌ها تکمیل شده است")
-                else showMission(mission, firstMissing)
+                if (multiline) { minLines = 2; maxLines = 4 }
+            }
+            wrapper.addView(input, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            parent.addView(wrapper, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(9) })
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    onChanged(s?.toString().orEmpty())
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            return input
+        }
+
+        page.questionIndices.forEachIndexed { localIndex, globalIndex ->
+            val q = questions.optJSONObject(globalIndex) ?: return@forEachIndexed
+            val id = q.optString("id").trim()
+            if (id.isBlank()) return@forEachIndexed
+            val questionText = q.optString("text", q.optString("question", q.optString("title", q.optString("label", id))))
+            val panel = MaterialCardView(this).apply {
+                radius = dp(17).toFloat()
+                strokeWidth = dp(1)
+                strokeColor = line
+                cardElevation = dp(1).toFloat()
+                setCardBackgroundColor(Color.WHITE)
+            }
+            val inside = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                setPadding(dp(14), dp(13), dp(14), dp(14))
+            }
+            val questionHeader = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+            }
+            val number = TextView(this).apply {
+                text = (localIndex + 1).toString()
+                textSize = 14f
+                typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                setTextColor(navy)
+                gravity = Gravity.CENTER
+                background = rounded(Color.rgb(248, 239, 215), 10)
+                setPadding(dp(11), dp(7), dp(11), dp(7))
+            }
+            questionHeader.addView(number)
+            questionHeader.addView(text("کد $id", 11, true, muted).apply {
+                setPadding(dp(9), 0, dp(9), 0)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val existingScore = draft.answers.optString(id)
+            val scoreValue = existingScore.toDoubleOrNull()
+            val state = TextView(this).apply {
+                text = if (scoreValue != null && scoreValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
+                textSize = 10f
+                setTextColor(if (scoreValue != null && scoreValue in 0.0..100.0) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31))
+                setPadding(dp(8), dp(5), dp(8), dp(5))
+                background = rounded(if (scoreValue != null && scoreValue in 0.0..100.0) Color.rgb(229, 246, 237) else Color.rgb(250, 243, 226), 30)
+            }
+            questionHeader.addView(state)
+            inside.addView(questionHeader)
+            inside.addView(text(questionText, 15, true, navy).apply {
+                setPadding(0, dp(11), 0, dp(12))
+            })
+            inside.addView(text("امتیاز ارزیابی · از ۰ تا ۱۰۰", 12, true, muted).apply {
+                setPadding(0, 0, 0, dp(5))
+            })
+            val scoreInput = addInput(inside, "امتیاز این بند", existingScore, true, false) { value ->
+                draft.answers.put(id, value)
+                draft.clearAcknowledgement()
+                draft.save()
+                val numericValue = value.toDoubleOrNull()
+                state.text = if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
+                state.setTextColor(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31))
+                state.background = rounded(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(229, 246, 237) else Color.rgb(250, 243, 226), 30)
+                refreshProgress()
+            }
+            val quickScores = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutDirection = View.LAYOUT_DIRECTION_LTR
+                gravity = Gravity.CENTER
+            }
+            listOf("0", "25", "50", "75", "100").forEach { value ->
+                val quick = TextView(this).apply {
+                    text = value
+                    textSize = 12f
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setTextColor(navy)
+                    gravity = Gravity.CENTER
+                    background = rounded(Color.rgb(239, 243, 248), 9)
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { scoreInput.setText(value) }
+                }
+                quickScores.addView(quick, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                    marginStart = dp(3); marginEnd = dp(3)
+                })
+            }
+            inside.addView(quickScores, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40)
+            ).apply { bottomMargin = dp(10) })
+            addInput(inside, "توضیحات و دلایل ارزیابی (در صورت نیاز)", draft.notes.optString(id), false, true) { value ->
+                draft.notes.put(id, value)
+                draft.save()
+            }
+
+            val attached = EvidenceRefs.references(draft.attachments, id)
+            inside.addView(text("مستندات این بند · ${attached.size} از ${EvidenceRefs.MAX_PER_QUESTION}", 12, true, muted).apply {
+                setPadding(0, dp(2), 0, dp(7))
+            })
+            if (attached.size < EvidenceRefs.MAX_PER_QUESTION) {
+                val evidenceActions = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                }
+                val cameraAction = makeButton("دوربین", false) { launchCamera(id) }.apply {
+                    setIconResource(R.drawable.ic_camera)
+                    iconTint = ColorStateList.valueOf(navy)
+                }
+                evidenceActions.addView(cameraAction, LinearLayout.LayoutParams(0, dp(47), 1f).apply {
+                    marginEnd = dp(4)
+                })
+                val galleryAction = makeButton("گالری / PDF", false) { launchEvidencePicker(id) }
+                evidenceActions.addView(galleryAction, LinearLayout.LayoutParams(0, dp(47), 1f).apply {
+                    marginStart = dp(4)
+                })
+                inside.addView(evidenceActions, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(47)
+                ).apply { bottomMargin = dp(8) })
+            } else {
+                inside.addView(text("سقف چهار مستند برای این سؤال تکمیل است.", 11, true, muted))
+            }
+            attached.forEachIndexed { attachmentIndex, reference ->
+                val attachmentRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                    background = rounded(Color.rgb(246, 248, 251), 10)
+                    setPadding(dp(8), dp(7), dp(8), dp(7))
+                }
+                attachmentRow.addView(text("${attachmentIndex + 1}. ${evidenceVault.metadata(reference)}", 10, false, ink),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                val viewButton = makeButton("مشاهده", false) { openAttachedEvidence(reference) }
+                attachmentRow.addView(viewButton, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginStart = dp(4) })
+                val deleteButton = makeButton("حذف", false) {
+                    AlertDialog.Builder(this)
+                        .setTitle("حذف مستند")
+                        .setMessage("فقط نسخه رمزنگاری‌شده این مستند از پیش‌نویس حذف می‌شود؛ فایل اصلی گوشی دست‌نخورده می‌ماند.")
+                        .setNegativeButton("انصراف", null)
+                        .setPositiveButton("حذف مستند") { _, _ ->
+                            if (EvidenceRefs.remove(draft.attachments, id, reference)) {
+                                draft.save()
+                                if (reference !in EvidenceRefs.all(draft.attachments)) evidenceVault.delete(reference)
+                            }
+                            showMission(mission, globalIndex)
+                        }.show()
+                }
+                attachmentRow.addView(deleteButton, LinearLayout.LayoutParams(dp(80), dp(40)))
+                inside.addView(attachmentRow, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(5) })
+            }
+            panel.addView(inside)
+            content.addView(panel, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(11) })
+        }
+
+        label("پاسخ‌ها و مستندات هر آیتم به‌صورت خودکار و امن ذخیره می‌شوند. تکمیل همه بندها برای امضا الزامی نیست؛ بندهای خالی در مرحله امضا به شما اعلام می‌شوند.",
+            11, false, muted)
+
+        fun openReview() {
+            draft.save()
+            if (!enabled) {
+                AlertDialog.Builder(this)
+                    .setTitle("مأموریت هنوز برای ارسال فعال نیست")
+                    .setMessage("تکمیل همه بندها الزامی نیست؛ اما تاریخ یا مجوز این مأموریت در آخرین پاسخ سرور فعال نیست. پیش‌نویس شما حفظ شده است.")
+                    .setNegativeButton("بازگشت به ویرایش", null)
+                    .setNeutralButton("مرور گزارش", { _, _ -> showReportReview(mission, draft) })
+                    .setPositiveButton("به‌روزرسانی مأموریت", { _, _ ->
+                        showHome("missions")
+                        connectAndSync()
+                    }).show()
+            } else {
+                showReportReview(mission, draft)
             }
         }
-        gap(15)
-        secondaryButton("ذخیره پیش‌نویس") { draft.save(); notifyShort("پیش‌نویس روی دستگاه ذخیره شد") }
-        label("پاسخ‌ها هنگام تایپ به‌صورت خودکار و رمزنگاری‌شده ذخیره می‌شوند.",12,false,muted)
-        if (enabled) {
-            gap(8)
-            button("پایان بازرسی و مرور گزارش") { showReportReview(mission, draft) }
-            label("ارسال نهایی تنها با اتصال اینترنت انجام می‌شود.",12,false,muted)
+
+        // Fixed native navigation: previous section, sign/review from any section, next section.
+        val footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            setBackgroundColor(Color.WHITE)
         }
+        val previous = makeButton("شاخص قبلی", false) {
+            if (currentSectionIndex > 0) showMission(mission, pages[currentSectionIndex - 1].questionIndices.first())
+        }.apply { isEnabled = currentSectionIndex > 0; textSize = 12f }
+        footer.addView(previous, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(3) })
+        val sign = makeButton("امضا", true) { openReview() }.apply {
+            setIconResource(R.drawable.ic_signature)
+            iconTint = ColorStateList.valueOf(Color.WHITE)
+            textSize = 12f
+        }
+        footer.addView(sign, LinearLayout.LayoutParams(0, dp(50), 0.85f).apply {
+            marginStart = dp(3); marginEnd = dp(3)
+        })
+        val nextCaption = if (currentSectionIndex < pages.lastIndex) "شاخص بعدی" else "مرور گزارش"
+        val next = makeButton(nextCaption, true) {
+            if (currentSectionIndex < pages.lastIndex) {
+                draft.save()
+                showMission(mission, pages[currentSectionIndex + 1].questionIndices.first())
+            } else openReview()
+        }.apply { textSize = 12f }
+        footer.addView(next, LinearLayout.LayoutParams(0, dp(50), 1.15f).apply { marginStart = dp(3) })
+        shell.addView(View(this).apply { setBackgroundColor(line) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+        shell.addView(footer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
+        ))
     }
 
     /** A dedicated native review screen before the user intentionally queues a report. */
@@ -1913,7 +2102,15 @@ class MainActivity : AppCompatActivity() {
             else "اینترنت در دسترس نیست. گزارش رمزنگاری‌شده در صف دستگاه می‌ماند تا خودتان آن را ارسال کنید.",
             12, false, muted)
         gap(10)
-        button("تأیید گزارش و امضای لمسی") { askBeforeSignature(mission, draft) }
+        if (!mission.optBoolean("can_execute", false)) {
+            label("این پیش‌نمایش فقط برای بررسی است. زمان یا مجوز این مأموریت در سرور فعال نیست؛ بعد از همگام‌سازی و فعال‌شدن مأموریت می‌توانید امضا کنید.", 12, true, Color.rgb(157, 99, 29))
+            secondaryButton("به‌روزرسانی مأموریت") {
+                showHome("missions")
+                connectAndSync()
+            }
+        } else {
+            button("تأیید گزارش و امضای لمسی") { askBeforeSignature(mission, draft) }
+        }
         secondaryButton("بازگشت به ویرایش") { showMission(mission, currentQuestionIndex) }
     }
 
@@ -2235,9 +2432,7 @@ class MainActivity : AppCompatActivity() {
                         // Transport-only optimization also covers photos in older saved drafts.
                         // The encrypted original remains untouched until server receipt.
                         val attachment = evidenceVault.read(reference, contentResolver)
-                        val prepared = evidenceVault.readPrepared(reference) ?: PhotoUploadOptimizer.prepare(attachment).also { candidate ->
-                            if (candidate.optimized) runCatching { evidenceVault.savePrepared(reference, candidate) }
-                        }
+                        val prepared = PhotoUploadOptimizer.prepare(attachment)
                         if (prepared.optimized) {
                             updateTransferProgress(scope,
                                 "بهینه‌سازی عکس $position از $documentCount: " +

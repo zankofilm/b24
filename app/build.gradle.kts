@@ -15,7 +15,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = 18
-        versionName = "4.10.2-native-photo-200kb"
+        versionName = "4.11.0-section-pages"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     buildFeatures { buildConfig = true }
