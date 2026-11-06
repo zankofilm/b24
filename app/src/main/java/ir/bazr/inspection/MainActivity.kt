@@ -626,7 +626,7 @@ class MainActivity : AppCompatActivity() {
             minimumHeight = dp(112)
         }
         val badge = FrameLayout(this).apply {
-            background = rounded(background, 12)
+            setBackground(rounded(background, 12))
             addView(icon(drawable, foreground, 22),
                 FrameLayout.LayoutParams(dp(25), dp(25), Gravity.CENTER))
         }

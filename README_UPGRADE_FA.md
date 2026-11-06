@@ -26,3 +26,6 @@
 
 ## تنظیم API
 در `app/build.gradle.kts` مقدار نمونه `https://example.invalid/api/` فقط fallback ساخت است. مقدار واقعی را در GitHub Actions Variable با نام `BAZR_API_BASE_URL` وارد کنید؛ URL باید HTTPS باشد و با `/` پایان یابد.
+
+## اصلاحیه ساخت
+این بسته شامل اصلاحیه `Build Fix 1` است که خطای Kotlin در `MainActivity.kt:629` را رفع می‌کند. پس از جایگزینی فایل‌ها، workflow را دوباره اجرا کنید. ساخت APK در GitHub Actions باید سبز شود؛ این اصلاحیه به‌تنهایی ادعای build موفق یا تست روی گوشی ندارد.
