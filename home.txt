@@ -1,0 +1,626 @@
+        val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(11), 0, dp(7), 0) }
+        info.addView(text(name, 14, true, navy))
+        info.addView(text("کد: $code  •  گروه: $group", 11, false, muted))
+        row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(chip("مجاز", Color.rgb(228, 247, 240), Color.rgb(21, 116, 77)))
+        card.addView(row)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) }
+        destination.addView(card, lp)
+    }
+
+    private fun showHome(tab: String = "home") {
+        selectedMission = null
+        openDraft = null
+        activeTab = tab
+        val profile = serverSnapshot.optJSONObject("profile")
+        val profileName = profile?.optString("name", "بازرس") ?: "بازرس"
+        val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+        val all = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }
+        val available = all.filter { it.optBoolean("can_execute",false) }
+        val drafted = all.filter { missionDraft(it) }
+        val queued = outbox.entries()
+        when (tab) {
+            "home" -> {
+                screen("", "", withNav = true)
+                hero(profileName)
+                val indicators = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                indicators.addView(chip(if (sessionToken != null) "دریافت از سرور" else "حالت اطلاعات ذخیره‌شده", 
+                    if (sessionToken != null) Color.rgb(228,245,237) else Color.rgb(255,246,228),
+                    if (sessionToken != null) Color.rgb(25,124,79) else Color.rgb(154,104,27)))
+                val lpChip = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT)
+                lpChip.marginStart=dp(7)
+                indicators.addView(chip(if (store.getString("last_sync") != null) "سوابق همگام‌سازی موجود" else "نیازمند همگام‌سازی",
+                    Color.rgb(235,242,251),navy),lpChip)
+                content.addView(indicators)
+                gap(8)
+                label(lastSyncDescription(), 12, false, muted)
+                if (sessionToken == null && all.isNotEmpty()) {
+                    gap(8)
+                    val caution = text("این مأموریت‌ها از حافظه امن دستگاه نمایش داده شده‌اند. برای دریافت تغییرات جدید همگام‌سازی کنید.", 12, false, Color.rgb(131, 90, 35)).apply {
+                        setPadding(dp(12), dp(12), dp(12), dp(12))
+                        background = rounded(Color.rgb(255, 247, 230), 12)
+                    }
+                    content.addView(caution)
+                }
+                gap(15)
+                sectionTitle("خلاصه کار من")
+                statsRow(
+                    statCard(all.size.toString(), "کل مأموریت‌ها", R.drawable.ic_clipboard, Color.rgb(231,241,252),navy),
+                    statCard(available.size.toString(), "قابل انجام", R.drawable.ic_check, Color.rgb(228,247,240),Color.rgb(21,116,77))
+                )
+                statsRow(
+                    statCard(drafted.size.toString(), "پیش‌نویس‌ها", R.drawable.ic_notes, Color.rgb(243,238,252),Color.rgb(99,69,150)),
+                    statCard(reportCount().toString(), "گزارش‌های همگام‌شده", R.drawable.ic_chart, Color.rgb(255,245,226),Color.rgb(156,99,27))
+                )
+                gap(5)
+                button("شروع بازرسی") {
+                    if (available.isNotEmpty()) showMission(available.first())
+                    else showHome("missions")
+                }
+                val actionsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                }
+                actionsRow.addView(quickActionCard("گزارش رسمی", "مشاهده و دریافت PDF", R.drawable.ic_official_report) {
+                    showOfficialReports()
+                }, LinearLayout.LayoutParams(0, dp(118), 1f).apply { marginEnd = dp(5) })
+                actionsRow.addView(quickActionCard("امضای دیجیتال", "بررسی پیش‌نویس‌ها", R.drawable.ic_signature) {
+                    showHome("drafts")
+                }, LinearLayout.LayoutParams(0, dp(118), 1f).apply { marginStart = dp(5) })
+                content.addView(actionsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(118)).apply {
+                    topMargin = dp(9); bottomMargin = dp(9)
+                })
+                val authorizedCount = serverSnapshot.optJSONArray("authorized_organizations")?.length() ?: 0
+                secondaryButton("ادارات مجاز من  •  ${authorizedCount}") { showHome("departments") }
+                if (queued.isNotEmpty()) {
+                    val batch = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", false) {
+                        sendAllQueued()
+                    }
+                    batch.setIconResource(R.drawable.ic_send_all)
+                    content.addView(batch)
+                    secondaryButton("نمایش صف ارسال و خطاها") { showOutbox() }
+                }
+                val supervisor = serverSnapshot.optJSONObject("supervisor")
+                if (supervisor?.optBoolean("can_review", false) == true) {
+                    val pendingCount = supervisor.optJSONArray("items")?.length() ?: 0
+                    val review = makeButton("کارتابل سربازرس  •  ${pendingCount} گزارش منتظر بررسی", false) { showHome("supervisor") }
+                    review.setIconResource(R.drawable.ic_shield)
+                    content.addView(review)
+                }
+                secondaryButton("همگام‌سازی مأموریت‌ها") {
+                    if (deviceToken == null) notifyShort("نشست دستگاه فعال نیست") else connectAndSync()
+                }
+                gap(12)
+                val nextMission = available.firstOrNull { missionDraft(it) } ?: available.firstOrNull()
+                if (nextMission != null) {
+                    sectionTitle("اقدام بعدی")
+                    label(if (missionDraft(nextMission)) "ادامه بازرسی نیمه‌تمام" else "مأموریت قابل انجام", 12, false, muted)
+                    missionItem(nextMission)
+                    gap(5)
+                }
+                sectionTitle("مأموریت‌های من", "نمایش همه") { showHome("missions") }
+                secondaryButton("سوابق بازرسی و رسیدها") { showHistory() }
+                val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
+                if (notices.length() > 0) secondaryButton("اطلاعیه‌های سازمانی (${notices.length()})") { showNotices() }
+                if (all.isEmpty()) emptyState("مأموریتی دریافت نشده", "اگر به شما مأموریت داده شده، با اتصال اینترنت همگام‌سازی کنید.")
+                else all.filterNot { nextMission != null && missionKey(it) == missionKey(nextMission) }.take(3).forEach { missionItem(it) }
+                gap(8)
+                label("پیش‌نویس‌ها بدون اینترنت هم ذخیره می‌شوند؛ ارسال نهایی نیازمند اینترنت است.",12,false,muted)
+            }
+            "supervisor" -> showSupervisorInbox()
+            "missions" -> {
+                screen("مأموریت‌های من", "جست‌وجو و پیگیری مأموریت‌های ابلاغ‌شده", withNav = true)
+                val search = field("جست‌وجوی نام اداره")
+                search.setSingleLine(true)
+                search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
+                search.compoundDrawablePadding = dp(8)
+                val options = listOf(
+                    Triple("all", "همه (${all.size})", all.size),
+                    Triple("ready", "قابل انجام (${available.size})", available.size),
+                    Triple("draft", "پیش‌نویس (${drafted.size})", drafted.size)
+                )
+                var chosenFilter = "all"
+                val filterRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                }
+                val buttons = mutableMapOf<String, MaterialButton>()
+                val resultArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                val counter = text("", 12, false, muted)
+                fun renderList() {
+                    val query = search.text?.toString()?.trim().orEmpty()
+                    val candidates = all.filter { mission ->
+                        val matchesStatus = when (chosenFilter) {
+                            "ready" -> mission.optBoolean("can_execute", false)
+                            "draft" -> missionDraft(mission)
+                            else -> true
+                        }
+                        val matchesText = query.isBlank() ||
+                            mission.optString("orgName", "").contains(query, ignoreCase = true) ||
+                            mission.optString("date", "").contains(query, ignoreCase = true)
+                        matchesStatus && matchesText
+                    }
+                    counter.text = "${candidates.size} مأموریت نمایش داده می‌شود"
+                    resultArea.removeAllViews()
+                    if (candidates.isEmpty()) {
+                        val notice = text("مأموریتی با این فیلتر پیدا نشد.", 14, false, muted).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(12), dp(28), dp(12), dp(28))
+                            background = rounded(Color.WHITE, 14)
+                        }
+                        resultArea.addView(notice)
+                    } else candidates.forEach { missionItem(it, resultArea) }
+                    buttons.forEach { (id, button) ->
+                        val active = id == chosenFilter
+                        button.backgroundTintList = ColorStateList.valueOf(if (active) navy else Color.WHITE)
+                        button.setTextColor(if (active) Color.WHITE else muted)
+                        button.strokeColor = ColorStateList.valueOf(if (active) gold else line)
+                    }
+                }
+                options.forEachIndexed { index, (id, title, _) ->
+                    val button = makeButton(title, false) {
+                        chosenFilter = id
+                        renderList()
+                    }.apply {
+                        textSize = 11f
+                        minHeight = dp(44)
+                        setPadding(dp(3), 0, dp(3), 0)
+                    }
+                    buttons[id] = button
+                    filterRow.addView(button, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+                        if (index > 0) marginStart = dp(6)
+                    })
+                }
+                content.addView(filterRow)
+                gap(8)
+                content.addView(counter)
+                gap(10)
+                content.addView(resultArea)
+                gap(12)
+                secondaryButton("دریافت آخرین مأموریت‌ها") {
+                    if (deviceToken == null) notifyShort("برای همگام‌سازی ابتدا وارد حساب شوید")
+                    else connectAndSync()
+                }
+                search.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderList()
+                    override fun afterTextChanged(s: Editable?) {}
+                })
+                renderList()
+            }
+            "departments" -> {
+                screen("ادارات مجاز من", "فقط اداراتی که مدیر برای شما تعیین کرده است", withNav = true)
+                val orgs = serverSnapshot.optJSONArray("authorized_organizations") ?: JSONArray()
+                val access = serverSnapshot.optJSONObject("access_policy")
+                val mode = access?.optString("access_mode", "all") ?: "all"
+                val modeLabel = when (mode) {
+                    "selected" -> "دسترسی انتخابی و اختصاصی"
+                    "groups" -> "دسترسی بر اساس گروه اداری"
+                    else -> "دسترسی عمومی به ادارات فعال"
+                }
+                val banner = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line
+                    cardElevation = 0f; setCardBackgroundColor(Color.WHITE)
+                }
+                val bannerBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
+                bannerBody.addView(text(modeLabel, 14, true, navy))
+                bannerBody.addView(text("${orgs.length()} اداره در آخرین همگام‌سازی برای شما مجاز بوده است.", 12, false, muted))
+                banner.addView(bannerBody); content.addView(banner)
+                gap(10)
+                val search = field("جست‌وجوی نام اداره، کد یا گروه")
+                search.setSingleLine(true)
+                search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
+                search.compoundDrawablePadding = dp(8)
+                content.addView(search)
+                gap(8)
+                val count = text("", 12, false, muted)
+                content.addView(count)
+                val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                content.addView(results)
+                fun renderDepartments() {
+                    val query = search.text?.toString()?.trim().orEmpty()
+                    val filtered = (0 until orgs.length()).mapNotNull { orgs.optJSONObject(it) }.filter { org ->
+                        query.isBlank() || listOf(org.optString("name"), org.optString("code"), org.optString("comparisonGroup"), org.optString("category"))
+                            .any { it.contains(query, ignoreCase = true) }
+                    }
+                    count.text = "${filtered.size} اداره نمایش داده می‌شود"
+                    results.removeAllViews()
+                    if (filtered.isEmpty()) {
+                        val empty = text(if (orgs.length() == 0) "هنوز اداره‌ای برای شما مجاز نشده است." else "اداره‌ای با این جست‌وجو پیدا نشد.", 14, false, muted).apply {
+                            gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
+                        }
+                        results.addView(empty)
+                    } else filtered.forEach { departmentItem(it, results) }
+                }
+                search.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderDepartments()
+                    override fun afterTextChanged(s: Editable?) {}
+                })
+                renderDepartments()
+                gap(8)
+                label("تغییر یا افزودن دسترسی فقط توسط مدیر سامانه انجام می‌شود. برای دریافت تغییرات جدید، همگام‌سازی کنید.", 11, false, muted)
+                secondaryButton("همگام‌سازی دسترسی‌ها") {
+                    if (deviceToken == null) notifyShort("ابتدا وارد حساب بازرس شوید") else connectAndSync()
+                }
+            }
+            "drafts" -> {
+                screen("پیش‌نویس‌های من", "کارهای ذخیره‌شده روی همین دستگاه",withNav=true)
+                label("${drafted.size} پیش‌نویس موجود",18,true,navy)
+                gap(6)
+                val ready = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", true) { sendAllQueued() }
+                ready.setIconResource(R.drawable.ic_send_all)
+                content.addView(ready)
+                secondaryButton("نمایش صف ارسال و جزئیات خطاها") { showOutbox() }
+                gap(10)
+                if (drafted.isEmpty()) emptyState("پیش‌نویسی ندارید","هنگام پاسخ به چک‌لیست، اطلاعات به‌صورت خودکار ذخیره می‌شود.")
+                else drafted.forEach { mission ->
+                    val key = missionKey(mission)
+                    val pending = outbox.get(key)
+                    val draft = InspectionDraft(key, store)
+                    val status = when {
+                        pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
+                        pending != null -> "امضاشده · آماده ارسال"
+                        draft.validate(mission).isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
+                        draft.unscoredIds(mission).isNotEmpty() -> "پیش‌نویس با ${draft.unscoredIds(mission).size} بند بی‌امتیاز"
+                        else -> "آماده مرور و امضا"
+                    }
+                    label("وضعیت: $status", 12, false, if (pending != null) teal else muted)
+                    missionItem(mission)
+                }
+                gap(12)
+                label("برای جلوگیری از حذف اطلاعات، داده‌های برنامه را از تنظیمات گوشی پاک نکنید.",12,false,muted)
+            }
+            "account" -> {
+                screen("حساب بازرس", "تنظیمات امنیت و ارتباط",withNav=true)
+                val panel = LinearLayout(this).apply {
+                    orientation=LinearLayout.VERTICAL
+                    setPadding(dp(18),dp(20),dp(18),dp(20))
+                    setBackground(rounded(Color.WHITE,18))
+                }
+                panel.addView(iconBadge(R.drawable.ic_person, 28), LinearLayout.LayoutParams(dp(48), dp(48)))
+                panel.addView(text(profileName,21,true,navy).apply { setPadding(0,dp(12),0,dp(4)) })
+                panel.addView(text("حساب سازمانی بازرس",13,false,muted))
+                content.addView(panel)
+                gap(20)
+                sectionTitle("امنیت حساب")
+                if (deviceToken != null && !store.biometricEnabled()) {
+                    button("فعال‌سازی ورود با اثرانگشت") { enableBiometric() }
+                } else if (store.biometricEnabled()) {
+                    label("ورود با اثرانگشت برای این دستگاه فعال است.",14,false,teal)
+                }
+                sectionTitle("سوابق و اطلاعیه‌ها")
+                secondaryButton("سوابق بازرسی و رسیدها") { showHistory() }
+                secondaryButton("اطلاعیه‌های سازمانی") { showNotices() }
+                sectionTitle("اعلان مأموریت جدید")
+                if (store.getString("notify_missions_enabled") == "yes") {
+                    label("اعلان در زمان همگام‌سازی دستی فعال است؛ دریافت خودکار پس‌زمینه‌ای هنوز وجود ندارد.", 12, false, muted)
+                    secondaryButton("غیرفعال‌کردن اعلان") {
+                        store.putString("notify_missions_enabled", "no"); showHome("account")
+                    }
+                } else {
+                    secondaryButton("فعال‌سازی اعلان مأموریت‌های جدید") { enableMissionNotifications() }
+                }
+                sectionTitle("ارتباط با سامانه")
+                secondaryButton("همگام‌سازی اطلاعات") { connectAndSync() }
+                secondaryButton("خروج از حساب") { confirmLogout() }
+                gap(12)
+                label("نسخه ${BuildConfig.VERSION_NAME}  •  اتصال امن HTTPS",12,false,muted)
+            }
+            else -> showHome("home")
+        }
+    }
+
+    private fun showSupervisorInbox() {
+        activeTab = "supervisor"
+        selectedMission = null
+        openDraft = null
+        val supervisor = serverSnapshot.optJSONObject("supervisor") ?: JSONObject()
+        screen("کارتابل سربازرس", "بررسی گزارش‌های ارسال‌شده توسط بازرسان", withNav = true)
+        if (!supervisor.optBoolean("can_review", false)) {
+            emptyState("دسترسی سربازرس فعال نیست", "این حساب باید توسط مدیرکل به‌عنوان سربازرس تعیین شود.")
+            secondaryButton("بازگشت به خانه") { showHome("home") }
+            return
+        }
+        val items = supervisor.optJSONArray("items") ?: JSONArray()
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(Color.WHITE, 16)
+        }
+        header.addView(text("${items.length()} گزارش در انتظار بررسی", 18, true, navy))
+        header.addView(text("تأیید سربازرس مرحله اول است؛ پس از آن گزارش برای تأیید نهایی مدیریت ارسال می‌شود.", 12, false, muted).apply {
+            setPadding(0, dp(7), 0, 0)
+        })
+        content.addView(header)
+        gap(12)
+        secondaryButton("به‌روزرسانی کارتابل") { refreshSupervisorInbox() }
+        if (items.length() == 0) {
+            emptyState("گزارش منتظر بررسی ندارید", "در حال حاضر گزارشی برای تأیید سربازرس وجود ندارد.")
+        }
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val org = item.optString("org_name", "دستگاه اجرایی")
+            val inspector = item.optString("inspector_name", "بازرس")
+            val receipt = item.optString("receipt_code", "—")
+            val score = if (item.has("score") && !item.isNull("score")) item.optDouble("score").let { String.format(Locale.US, "%.1f", it) } else "—"
+            val answers = item.optJSONObject("evaluation")?.optInt("answered_count", 0) ?: 0
+            val total = item.optJSONObject("evaluation")?.optInt("question_count", 0) ?: 0
+            val panel = MaterialCardView(this).apply {
+                radius = dp(16).toFloat()
+                strokeWidth = dp(1)
+                strokeColor = line
+                cardElevation = dp(1).toFloat()
+                setCardBackgroundColor(Color.WHITE)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showSupervisorReport(item) }
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(15), dp(14), dp(15), dp(14))
+            }
+            box.addView(text(org, 17, true, navy))
+            box.addView(text("بازرس: $inspector  •  کد: ${item.optString("inspector_ref", "—")}", 12, false, muted).apply { setPadding(0, dp(6), 0, 0) })
+            box.addView(text("امتیاز: $score  •  پاسخ‌ها: $answers از $total", 13, true, ink).apply { setPadding(0, dp(8), 0, 0) })
+            box.addView(text("رسید: $receipt  •  وضعیت: ${if (item.optString("review_status") == "admin_review") "در انتظار تأیید سربازرس" else "در انتظار بررسی"}", 11, false, muted).apply { setPadding(0, dp(6), 0, 0) })
+            box.addView(text("مشاهده جزئیات و بررسی  ←", 12, true, Color.rgb(150, 111, 43)).apply { setPadding(0, dp(9), 0, 0) })
+            panel.addView(box)
+            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+        }
+
+        val history = supervisor.optJSONArray("history") ?: JSONArray()
+        if (history.length() > 0) {
+            gap(10)
+            sectionTitle("سوابق گزارش‌ها (${history.length()})")
+            label("گزارش‌های قبلاً بررسی‌شده در این بخش فقط برای مشاهده هستند.", 11, false, muted)
+            for (index in 0 until history.length()) {
+                val item = history.optJSONObject(index) ?: continue
+                val org = item.optString("org_name", "دستگاه اجرایی")
+                val inspector = item.optString("inspector_name", "بازرس")
+                val receipt = item.optString("receipt_code", "—")
+                val statusText = when (item.optString("review_status")) {
+                    "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                    "approved", "accepted" -> "تأیید نهایی مدیریت"
+                    "returned", "rejected" -> "بازگشت برای اصلاح"
+                    else -> "بررسی‌شده"
+                }
+                val panel = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat()
+                    strokeWidth = dp(1)
+                    strokeColor = line
+                    cardElevation = dp(1).toFloat()
+                    setCardBackgroundColor(Color.WHITE)
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { showSupervisorReport(item) }
+                }
+                val box = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                }
+                box.addView(text(org, 15, true, navy))
+                box.addView(text("بازرس: $inspector", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                box.addView(text("وضعیت: $statusText", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+                box.addView(text("رسید: $receipt  •  مشاهده جزئیات ←", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                panel.addView(box)
+                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) })
+            }
+        } else if (items.length() == 0) {
+            gap(8)
+            emptyState("سابقه‌ای برای نمایش وجود ندارد", "گزارش‌های جدید پس از ارسال بازرس در این کارتابل ثبت می‌شوند.")
+        }
+    }
+
+    private fun showSupervisorReport(report: JSONObject) {
+        if (!report.has("payload")) {
+            val id = report.optInt("id", 0)
+            val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست؛ دوباره وارد شوید"); return }
+            if (id <= 0) { notifyShort("شناسه گزارش نامعتبر است"); return }
+            work({ api.get("mobile_supervisor_report.php?submission_id=$id", sessionFor(device)) }) { detail -> showSupervisorReport(detail) }
+            return
+        }
+        activeTab = "supervisor"
+        selectedMission = null
+        val payload = report.optJSONObject("payload") ?: JSONObject()
+        val org = report.optString("org_name", "دستگاه اجرایی")
+        val inspector = report.optString("inspector_name", "بازرس")
+        val receipt = report.optString("receipt_code", "—")
+        val score = if (report.has("score") && !report.isNull("score")) String.format(Locale.US, "%.1f", report.optDouble("score")) else "—"
+        screen("بررسی گزارش بازرس", org, withNav = true)
+        val summary = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(15), dp(15), dp(15))
+            background = rounded(Color.WHITE, 16)
+        }
+        summary.addView(text(org, 18, true, navy))
+        summary.addView(text("نام بازرس: $inspector  •  کد پرسنلی: ${report.optString("inspector_ref", "—")}", 12, false, muted).apply { setPadding(0, dp(8), 0, 0) })
+        summary.addView(text("امتیاز نهایی بازرس: $score", 16, true, ink).apply { setPadding(0, dp(9), 0, 0) })
+        val submittedAt = report.optString("submitted_at", "").replace('T', ' ').take(19).ifBlank { "ثبت نشده" }
+        val evaluation = report.optJSONObject("evaluation") ?: payload.optJSONObject("evaluation") ?: JSONObject()
+        val coverage = if (evaluation.has("coverage_percent")) String.format(Locale.US, "%.0f%%", evaluation.optDouble("coverage_percent")) else "—"
+        val unscoredCount = evaluation.optJSONArray("unscored_question_ids")?.length() ?: 0
+        summary.addView(text("تاریخ ارسال: $submittedAt", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+        summary.addView(text("پوشش ارزیابی: $coverage  •  بندهای بدون امتیاز: $unscoredCount", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+        summary.addView(text("کد رسید: $receipt", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+        content.addView(summary)
+        gap(14)
+        sectionTitle("جزئیات چک‌لیست")
+        val snapshot = payload.optJSONObject("checklist_snapshot") ?: payload.optJSONObject("checklistSnapshot") ?: JSONObject()
+        val questions = snapshot.optJSONArray("questions") ?: JSONArray()
+        val answers = payload.optJSONObject("answers") ?: JSONObject()
+        val notes = payload.optJSONObject("notes") ?: JSONObject()
+        if (questions.length() == 0) {
+            emptyState("جزئیات بندها در گزارش موجود نیست", "خلاصه گزارش و امتیاز ثبت‌شده در دسترس است.")
+        } else {
+            for (index in 0 until questions.length()) {
+                val question = questions.optJSONObject(index) ?: continue
+                val qid = question.optString("id", "")
+                val title = question.optString("text", question.optString("title", question.optString("question", "بند ارزیابی ${index + 1}")))
+                val rawAnswer = if (qid.isNotBlank()) answers.opt(qid) else null
+                val answer = when (rawAnswer) {
+                    null, JSONObject.NULL -> "بدون امتیاز"
+                    is JSONObject -> rawAnswer.optString("score", rawAnswer.optString("value", rawAnswer.toString()))
+                    else -> rawAnswer.toString()
+                }
+                val note = if (qid.isNotBlank()) notes.optString(qid, "") else ""
+                val panel = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(13), dp(12), dp(13), dp(12))
+                    background = rounded(Color.WHITE, 13)
+                }
+                panel.addView(text("${index + 1}. $title", 13, true, navy))
+                panel.addView(text("امتیاز ثبت‌شده: $answer", 12, true, Color.rgb(143, 105, 39)).apply { setPadding(0, dp(6), 0, 0) })
+                if (note.isNotBlank()) panel.addView(text("توضیح بازرس: $note", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+            }
+        }
+        val findings = payload.optJSONArray("findings") ?: JSONArray()
+        if (findings.length() > 0) {
+            sectionTitle("نواقص و موارد ثبت‌شده (${findings.length()})")
+            for (index in 0 until findings.length()) {
+                val finding = findings.optJSONObject(index)
+                val findingText = if (finding != null) finding.optString("title", finding.optString("description", finding.optString("text", "مورد ثبت‌شده"))) else findings.optString(index)
+                val findingView = text("${index + 1}. $findingText", 12, false, ink).apply { setPadding(dp(12), dp(9), dp(12), dp(9)); background = rounded(Color.WHITE, 10) }
+                content.addView(findingView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            }
+        }
+        val uploads = report.optJSONArray("uploads") ?: JSONArray()
+        sectionTitle("مستندات و تصاویر (${uploads.length()})")
+        if (uploads.length() == 0) label("برای این گزارش مستندی ثبت نشده است.", 12, false, muted)
+        for (index in 0 until uploads.length()) {
+            val file = uploads.optJSONObject(index) ?: continue
+            val id = file.optInt("id", 0)
+            val name = file.optString("name", "مستند ${index + 1}")
+            val sizeKb = file.optLong("size", 0L) / 1024L
+            secondaryButton("مشاهده / دریافت: $name  (${sizeKb} KB)") { openSupervisorEvidence(id, name, file.optString("mime", "application/octet-stream")) }
+        }
+        gap(12)
+        val status = report.optString("review_status", "admin_review")
+        if (status == "admin_review" || status == "pending_review") {
+            button("تأیید گزارش توسط سربازرس") {
+                AlertDialog.Builder(this).setTitle("تأیید گزارش")
+                    .setMessage("گزارش این بازرس تأیید شود و برای تأیید نهایی به مدیریت ارسال شود؟")
+                    .setNegativeButton("انصراف", null)
+                    .setPositiveButton("تأیید و ارجاع به مدیریت") { _, _ -> submitSupervisorDecision(report, "approve", "") }
+                    .show()
+            }
+            secondaryButton("بازگشت برای اصلاح") {
+                val reason = EditText(this).apply {
+                    hint = "دلیل بازگشت برای بازرس"
+                    minLines = 3
+                    maxLines = 5
+                    gravity = Gravity.TOP or Gravity.RIGHT
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                }
+                AlertDialog.Builder(this).setTitle("بازگشت گزارش برای اصلاح")
+                    .setView(reason)
+                    .setNegativeButton("انصراف", null)
+                    .setPositiveButton("ثبت بازگشت") { _, _ ->
+                        val note = reason.text?.toString()?.trim().orEmpty()
+                        if (note.isBlank()) notifyShort("نوشتن دلیل بازگشت الزامی است")
+                        else submitSupervisorDecision(report, "return", note)
+                    }.show()
+            }
+        } else {
+            val statusLabel = when (status) {
+                "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                "approved", "accepted" -> "تأیید نهایی مدیریت"
+                "returned", "rejected" -> "بازگشت برای اصلاح"
+                else -> "خارج از صف بررسی"
+            }
+            label("وضعیت گزارش: $statusLabel. این گزارش در حالت فقط‌خواندنی است.", 12, false, muted)
+            val reviewer = report.optString("reviewed_by", "")
+            if (reviewer.isNotBlank()) label("ثبت‌کننده آخرین بررسی: $reviewer", 11, false, muted)
+            val reviewNote = report.optString("review_note", "")
+            if (reviewNote.isNotBlank()) label("توضیح بررسی: $reviewNote", 12, false, ink)
+        }
+        secondaryButton("بازگشت به کارتابل سربازرس") { showHome("supervisor") }
+    }
+
+    private fun submitSupervisorDecision(report: JSONObject, action: String, note: String) {
+        val id = report.optInt("id", 0)
+        val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست؛ دوباره وارد شوید"); return }
+        if (id <= 0) { notifyShort("شناسه گزارش نامعتبر است"); return }
+        work({
+            val session = sessionFor(device)
+            val result = api.post("mobile_supervisor_action.php", JSONObject()
+                .put("submission_id", id).put("action", action).put("note", note), session)
+            if (!result.optBoolean("ok", false)) throw UserActionException("پاسخ تأیید سربازرس از سرور معتبر نبود")
+            val inbox = try { api.get("mobile_supervisor_inbox.php", session) } catch (_: Exception) { null }
+            Pair(result, inbox)
+        }) { (_, inbox) ->
+            if (inbox != null) {
+                serverSnapshot.put("supervisor", inbox)
+            } else {
+                val old = serverSnapshot.optJSONObject("supervisor") ?: JSONObject()
+                val oldItems = old.optJSONArray("items") ?: JSONArray()
+                val kept = JSONArray()
+                for (index in 0 until oldItems.length()) {
+                    val item = oldItems.optJSONObject(index) ?: continue
+                    if (item.optInt("id", 0) != id) kept.put(item)
+                }
+                old.put("items", kept).put("count", kept.length())
+                serverSnapshot.put("supervisor", old)
+            }
+            store.save("mobile_sync", serverSnapshot.toString())
+            showHome("supervisor")
+            notifyShort(if (action == "approve") "گزارش تأیید شد و برای مدیریت ارسال شد" else "گزارش برای اصلاح به بازرس برگشت داده شد")
+        }
+    }
+
+    private fun refreshSupervisorInbox() {
+        val device = deviceToken ?: run { notifyShort("ابتدا وارد حساب شوید"); return }
+        work({
+            val session = sessionFor(device)
+            api.get("mobile_supervisor_inbox.php", session)
+        }) { inbox ->
+            serverSnapshot.put("supervisor", inbox)
+            store.save("mobile_sync", serverSnapshot.toString())
+            showHome("supervisor")
+        }
+    }
+
+    private fun openSupervisorEvidence(uploadId: Int, displayName: String, mimeHint: String) {
+        val device = deviceToken ?: run { notifyShort("نشست دستگاه فعال نیست"); return }
+        if (uploadId <= 0) { notifyShort("شناسه مستند نامعتبر است"); return }
+        work({
+            val session = sessionFor(device)
+            val (bytes, downloadedMime) = api.downloadSupervisorEvidence(uploadId, session)
+            val mime = if (downloadedMime == "application/octet-stream" && mimeHint.isNotBlank()) mimeHint else downloadedMime
+            val dir = File(cacheDir, "supervisor_evidence").apply { mkdirs() }
+            val ext = when (mime) {
+                "image/jpeg" -> ".jpg"
+                "image/png" -> ".png"
+                "image/webp" -> ".webp"
+                "application/pdf" -> ".pdf"
+                else -> ".bin"
+            }
+            val file = File(dir, "evidence-$uploadId$ext")
+            file.writeBytes(bytes)
+            Pair(file, mime)
+        }) { (file, mime) ->
+            try {
+                val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(intent)
+            } catch (_: Exception) {
+                notifyShort("برای باز کردن این نوع فایل، برنامه نمایشگر سازگار روی گوشی لازم است")
+            }
+        }
+    }
+
+    private data class ChecklistSectionPage(
+        val id: String,
+        val title: String,
+        val category: String,
+        val questionIndices: List<Int>
+    )
+
+    /** One independent, vertically-scrollable page per checklist section (شاخص). */
+    private fun showMission(mission: JSONObject, questionIndex: Int = 0) {
+        val key = missionKey(mission)
