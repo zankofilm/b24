@@ -24,6 +24,8 @@ import androidx.core.content.FileProvider
 import java.io.File
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.text.TextWatcher
 import android.text.Editable
@@ -31,6 +33,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -246,15 +249,17 @@ class MainActivity : AppCompatActivity() {
         })
         val cached = store.load("mobile_sync")
         if (cached != null) try { serverSnapshot = JSONObject(cached) } catch (_: Exception) { }
-        when {
-            store.biometricEnabled() -> showBiometricLock()
-            store.load("device_token") != null -> {
-                deviceToken = store.load("device_token")
-                showHome()
-                connectAndSync()
+        showSplash {
+            when {
+                store.biometricEnabled() -> showBiometricLock()
+                store.load("device_token") != null -> {
+                    deviceToken = store.load("device_token")
+                    showHome()
+                    connectAndSync()
+                }
+                store.getString("request_id") != null -> showPending()
+                else -> showLogin()
             }
-            store.getString("request_id") != null -> showPending()
-            else -> showLogin()
         }
     }
 
@@ -320,50 +325,195 @@ class MainActivity : AppCompatActivity() {
         return content
     }
 
-    /** Compact institutional app bar. The full-width website banner is intentionally not used. */
+    /** Dark institutional toolbar matching the approved navy/gold mobile concept. */
     private fun appTopBar(): View {
         val wrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.rgb(5, 24, 44), Color.rgb(16, 48, 76)))
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setPadding(dp(18), dp(8), dp(18), dp(8))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
         }
         val mark = MaterialCardView(this).apply {
             radius = dp(13).toFloat()
             strokeWidth = dp(1)
             strokeColor = gold
             cardElevation = 0f
-            setCardBackgroundColor(navy)
+            setCardBackgroundColor(Color.rgb(12, 37, 62))
         }
         mark.addView(icon(R.drawable.ic_shield, gold, 25),
-            FrameLayout.LayoutParams(dp(27), dp(27), Gravity.CENTER))
-        row.addView(mark, LinearLayout.LayoutParams(dp(46), dp(46)))
+            FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
+        row.addView(mark, LinearLayout.LayoutParams(dp(44), dp(44)))
         val names = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), 0, dp(8), 0)
+            setPadding(dp(10), 0, dp(8), 0)
         }
-        names.addView(text("سامانه بازرسی ادارات", 15, true, navy))
-        names.addView(text("فرمانداری شهرستان جوانرود", 10, false, muted))
+        names.addView(text("سامانه بازرسی ادارات", 15, true, Color.WHITE))
+        names.addView(text("فرمانداری شهرستان جوانرود", 10, false, Color.rgb(210, 222, 234)))
         row.addView(names, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val badge = TextView(this).apply {
-            text = "بازرس"
-            textSize = 11f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setTextColor(navy)
+        val menu = TextView(this).apply {
+            text = "☰"
+            textSize = 25f
+            setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(11), dp(7), dp(11), dp(7))
-            background = rounded(Color.rgb(248, 243, 232), 10)
+            contentDescription = "منوی برنامه"
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(9), 0, dp(4), 0)
+            setOnClickListener { showAppMenu() }
         }
-        row.addView(badge)
-        wrapper.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        wrapper.addView(View(this).apply { setBackgroundColor(Color.rgb(226, 216, 194)) },
+        row.addView(menu, LinearLayout.LayoutParams(dp(42), dp(44)))
+        wrapper.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(70)))
+        wrapper.addView(View(this).apply { setBackgroundColor(gold) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         return wrapper
+    }
+
+    private fun showAppMenu() {
+        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "گزارش رسمی", "حساب کاربری")
+        val actions = mutableListOf<() -> Unit>(
+            { showHome("home") }, { showHome("missions") }, { showHome("departments") },
+            { showHome("drafts") }, { showOfficialReports() }, { showHome("account") }
+        )
+        if (serverSnapshot.optJSONObject("supervisor")?.optBoolean("can_review", false) == true) {
+            labels.add(4, "کارتابل سربازرس")
+            actions.add(4) { showHome("supervisor") }
+        }
+        AlertDialog.Builder(this).setTitle("ناوبری سامانه")
+            .setItems(labels.toTypedArray()) { _, which -> actions[which].invoke() }
+            .setNegativeButton("بستن", null).show()
+    }
+
+    /** Branded authentication shell; native controls remain independent of the artwork. */
+    private fun authScreen(): LinearLayout {
+        window.statusBarColor = Color.rgb(5, 24, 44)
+        window.navigationBarColor = Color.WHITE
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setBackgroundColor(pageBg)
+        }
+        loadingBar = LinearProgressIndicator(this).apply {
+            isIndeterminate = true
+            setIndicatorColor(gold)
+            trackColor = Color.rgb(230, 236, 243)
+            visibility = if (busy) View.VISIBLE else View.GONE
+        }
+        shell.addView(loadingBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)))
+        val scroll = ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false }
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setBackgroundColor(pageBg)
+        }
+        val hero = FrameLayout(this)
+        val building = ImageView(this).apply {
+            setImageResource(R.drawable.login_building)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        hero.addView(building, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(270)))
+        hero.addView(View(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.argb(145, 4, 22, 42), Color.argb(236, 5, 27, 49), Color.rgb(8, 35, 61)))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(270)))
+        val flag = ImageView(this).apply {
+            setImageResource(R.drawable.iran_flag_ribbon)
+            scaleType = ImageView.ScaleType.FIT_START
+            contentDescription = "پرچم ایران"
+        }
+        hero.addView(flag, FrameLayout.LayoutParams(dp(106), dp(92), Gravity.TOP or Gravity.LEFT).apply {
+            leftMargin = dp(7); topMargin = dp(7)
+        })
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(20), dp(23), dp(20), dp(28))
+        }
+        val seal = MaterialCardView(this).apply {
+            radius = dp(24).toFloat(); strokeWidth = dp(2); strokeColor = gold
+            cardElevation = dp(4).toFloat(); setCardBackgroundColor(Color.rgb(9, 34, 59))
+        }
+        seal.addView(icon(R.drawable.ic_shield, gold, 55), FrameLayout.LayoutParams(dp(68), dp(68), Gravity.CENTER))
+        brand.addView(seal, LinearLayout.LayoutParams(dp(92), dp(92)).apply { bottomMargin = dp(12) })
+        brand.addView(text("سامانه بازرسی ادارات", 23, true, Color.WHITE).apply { gravity = Gravity.CENTER })
+        brand.addView(text("فرمانداری شهرستان جوانرود", 14, true, Color.rgb(241, 198, 91)).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(7), 0, 0)
+        })
+        hero.addView(brand, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(270), Gravity.CENTER))
+        page.addView(hero, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(270)))
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(22), dp(24), dp(22), dp(25))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadii = floatArrayOf(dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), 0f, 0f, 0f, 0f)
+            }
+            elevation = dp(5).toFloat()
+        }
+        page.addView(form, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = -dp(24)
+        })
+        scroll.addView(page)
+        shell.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        setContentView(shell)
+        content = form
+        return form
+    }
+
+    private fun showSplash(next: () -> Unit) {
+        window.statusBarColor = Color.rgb(4, 22, 41)
+        window.navigationBarColor = Color.rgb(4, 22, 41)
+        window.decorView.systemUiVisibility = 0
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(4, 22, 41)) }
+        val banner = ImageView(this).apply {
+            setImageResource(R.drawable.official_brand_banner)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        root.addView(banner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(170), Gravity.TOP))
+        root.addView(View(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.argb(0, 4, 22, 41), Color.rgb(4, 22, 41)))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220), Gravity.TOP))
+        val building = ImageView(this).apply {
+            setImageResource(R.drawable.login_building)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.82f
+        }
+        root.addView(building, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210), Gravity.BOTTOM))
+        root.addView(View(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.TRANSPARENT, Color.rgb(4, 22, 41)))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(250), Gravity.BOTTOM))
+        val center = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(20), dp(24), dp(20))
+        }
+        val emblem = MaterialCardView(this).apply {
+            radius = dp(34).toFloat(); strokeWidth = dp(2); strokeColor = gold
+            cardElevation = dp(8).toFloat(); setCardBackgroundColor(Color.rgb(7, 32, 56))
+        }
+        emblem.addView(icon(R.drawable.ic_shield, Color.rgb(240, 190, 76), 72),
+            FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
+        center.addView(emblem, LinearLayout.LayoutParams(dp(112), dp(112)).apply { bottomMargin = dp(18) })
+        center.addView(text("سامانه بازرسی ادارات", 24, true, Color.WHITE).apply { gravity = Gravity.CENTER })
+        center.addView(text("فرمانداری شهرستان جوانرود", 15, true, Color.rgb(244, 194, 74)).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0)
+        })
+        center.addView(text("در مسیر نظارت دقیق و شفاف", 12, false, Color.rgb(222, 231, 240)).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(30), 0, 0)
+        })
+        root.addView(center, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        setContentView(root)
+        Handler(Looper.getMainLooper()).postDelayed({ if (!isFinishing && !isDestroyed) next() }, 1250L)
     }
 
     /** Subtly raised two-tone icon, consistent across dashboard and missions. */
@@ -494,8 +644,9 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(8), dp(5), dp(8), dp(8))
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.rgb(5, 24, 44), Color.rgb(15, 48, 76)))
+            setPadding(dp(6), dp(5), dp(6), dp(7))
             elevation = dp(8).toFloat()
         }
         val items = mutableListOf(
@@ -514,24 +665,19 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(2), dp(2), dp(2), dp(2))
-                isClickable = true
-                isFocusable = true
-                contentDescription = caption
+                isClickable = true; isFocusable = true; contentDescription = caption
                 setOnClickListener { if (!busy) showHome(id) }
             }
-            item.addView(View(this).apply {
-                setBackgroundColor(if (chosen) gold else Color.TRANSPARENT)
-            }, LinearLayout.LayoutParams(dp(30), dp(3)).apply { bottomMargin = dp(5) })
             val iconHolder = FrameLayout(this).apply {
-                background = rounded(if (chosen) Color.rgb(248, 243, 232) else Color.WHITE, 11)
-                addView(icon(drawable, if (chosen) navy else muted, 21),
-                    FrameLayout.LayoutParams(dp(25), dp(25), Gravity.CENTER))
+                background = if (chosen) rounded(Color.rgb(242, 190, 65), 12) else rounded(Color.TRANSPARENT, 12)
+                addView(icon(drawable, if (chosen) navy else Color.rgb(226, 234, 242), 21),
+                    FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
             }
-            item.addView(iconHolder, LinearLayout.LayoutParams(dp(42), dp(32)))
-            val captionView = text(caption, 10, chosen, if (chosen) navy else muted)
+            item.addView(iconHolder, LinearLayout.LayoutParams(dp(43), dp(34)))
+            val captionView = text(caption, 9, chosen, if (chosen) Color.rgb(248, 207, 104) else Color.rgb(215, 225, 235))
             captionView.gravity = Gravity.CENTER
             item.addView(captionView)
-            bar.addView(item, LinearLayout.LayoutParams(0, dp(61), 1f))
+            bar.addView(item, LinearLayout.LayoutParams(0, dp(58), 1f))
         }
         return bar
     }
@@ -566,43 +712,63 @@ class MainActivity : AppCompatActivity() {
     }
     private fun hero(profileName: String) {
         val card = MaterialCardView(this).apply {
-            radius = dp(19).toFloat()
-            strokeWidth = dp(1)
-            strokeColor = Color.rgb(48, 72, 96)
-            cardElevation = dp(2).toFloat()
-            setCardBackgroundColor(navy)
+            radius = dp(20).toFloat(); strokeWidth = dp(1); strokeColor = Color.rgb(52, 80, 107)
+            cardElevation = dp(3).toFloat(); setCardBackgroundColor(navy)
         }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setPadding(dp(17), dp(17), dp(17), dp(17))
+        val frame = FrameLayout(this)
+        val photo = ImageView(this).apply {
+            setImageResource(R.drawable.login_building)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.76f
+        }
+        frame.addView(photo, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        frame.addView(View(this).apply {
             background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(Color.rgb(8, 31, 56), Color.rgb(23, 57, 86))).apply {
-                cornerRadius = dp(19).toFloat()
-            }
+                intArrayOf(Color.argb(226, 5, 24, 44), Color.argb(192, 11, 43, 71), Color.argb(215, 5, 24, 44)))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(16), dp(15), dp(16), dp(15))
         }
-        val name = profileName.trim().ifBlank { "بازرس" }
-        val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        copy.addView(text("میز کار سازمانی", 11, true, gold))
-        copy.addView(text("سلام، $name", 21, true, Color.WHITE).apply {
-            setPadding(0, dp(7), 0, dp(5))
+        val avatar = MaterialCardView(this).apply {
+            radius = dp(30).toFloat(); strokeWidth = dp(1); strokeColor = Color.rgb(218, 180, 93)
+            setCardBackgroundColor(Color.rgb(236, 242, 247)); cardElevation = 0f
+        }
+        avatar.addView(icon(R.drawable.ic_person, navy, 33), FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER))
+        row.addView(avatar, LinearLayout.LayoutParams(dp(58), dp(58)))
+        val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(8), 0) }
+        copy.addView(text("میز کار سازمانی", 11, true, Color.rgb(244, 197, 83)))
+        copy.addView(text("سلام، ${profileName.trim().ifBlank { "بازرس" }}", 20, true, Color.WHITE).apply {
+            setPadding(0, dp(6), 0, dp(5))
         })
-        copy.addView(text("مأموریت‌ها و گزارش‌های شما", 12, false, Color.rgb(215, 225, 235)))
+        copy.addView(text("مأموریت‌ها و گزارش‌های شما", 12, false, Color.rgb(222, 232, 241)))
         row.addView(copy, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val seal = MaterialCardView(this).apply {
-            radius = dp(16).toFloat()
-            strokeWidth = dp(1)
-            strokeColor = Color.rgb(179, 145, 82)
-            setCardBackgroundColor(Color.rgb(20, 48, 72))
-            cardElevation = 0f
-        }
-        seal.addView(icon(R.drawable.ic_shield, gold, 29),
-            FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER))
-        row.addView(seal, LinearLayout.LayoutParams(dp(54), dp(54)))
-        card.addView(row)
-        content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val shield = icon(R.drawable.ic_shield, gold, 25)
+        row.addView(shield, LinearLayout.LayoutParams(dp(32), dp(32)))
+        frame.addView(row, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150), Gravity.CENTER))
+        card.addView(frame)
+        content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
         gap(14)
+    }
+
+    private fun quickActionCard(title: String, subtitle: String, drawable: Int, action: () -> Unit): View {
+        val card = MaterialCardView(this).apply {
+            radius = dp(16).toFloat(); strokeWidth = dp(1); strokeColor = line
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+            isClickable = true; isFocusable = true
+            setOnClickListener { if (!busy) action() }
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            setPadding(dp(10), dp(13), dp(10), dp(13))
+        }
+        val badge = iconBadge(drawable, 23)
+        body.addView(badge, LinearLayout.LayoutParams(dp(46), dp(46)).apply { bottomMargin = dp(8) })
+        body.addView(text(title, 14, true, navy).apply { gravity = Gravity.CENTER })
+        body.addView(text(subtitle, 10, false, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) })
+        card.addView(body)
+        return card
     }
 
     private fun emptyState(title: String, detail: String) {
@@ -645,85 +811,85 @@ class MainActivity : AppCompatActivity() {
     private fun showLogin() {
         selectedMission = null
         activeTab = "home"
-        screen("ورود بازرس", "دسترسی امن به مأموریت‌های سازمانی")
-
-        val intro = MaterialCardView(this).apply {
-            radius = dp(18).toFloat()
-            strokeWidth = dp(1)
-            strokeColor = line
-            cardElevation = dp(1).toFloat()
-            setCardBackgroundColor(Color.WHITE)
-        }
-        val introBody = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setPadding(dp(15), dp(15), dp(15), dp(15))
-        }
-        val seal = MaterialCardView(this).apply {
-            radius = dp(14).toFloat()
-            strokeWidth = dp(1)
-            strokeColor = gold
-            setCardBackgroundColor(navy)
-            cardElevation = 0f
-        }
-        seal.addView(icon(R.drawable.ic_shield, gold, 27),
-            FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER))
-        introBody.addView(seal, LinearLayout.LayoutParams(dp(52), dp(52)))
-        val introText = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
-        }
-        introText.addView(text("ورود به میز کار بازرس", 15, true, navy))
-        introText.addView(text("ثبت و پیگیری مأموریت‌های محوله", 11, false, muted).apply {
-            setPadding(0, dp(5), 0, 0)
-        })
-        introBody.addView(introText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        intro.addView(introBody)
-        content.addView(intro, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        gap(18)
-        sectionTitle("اطلاعات ورود")
-        val username = field("نام کاربری")
+        authScreen()
+        label("ورود به سامانه", 23, true, navy)
+        label("لطفاً اطلاعات کاربری خود را وارد کنید", 13, false, muted)
+        gap(8)
+        val remembered = store.getString("remembered_username").orEmpty()
+        val username = field("نام کاربری", remembered)
         val password = field("رمز عبور", password = true)
-        button("ورود امن و ثبت دستگاه") {
+        val remember = CheckBox(this).apply {
+            text = "مرا به خاطر بسپار"
+            textSize = 13f
+            setTextColor(ink)
+            buttonTintList = ColorStateList.valueOf(gold)
+            isChecked = remembered.isNotBlank()
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        content.addView(remember, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
+        gap(8)
+        val login = button("ورود به سامانه") {
             val name = username.text.toString().trim()
             val pass = password.text.toString()
             if (name.isBlank() || pass.isBlank()) {
-                notifyShort("نام کاربری و رمز عبور لازم است")
+                notifyShort("نام کاربری و رمز عبور را وارد کنید")
                 return@button
             }
+            if (remember.isChecked) store.putString("remembered_username", name)
+            else store.removeString("remembered_username")
             work({
-                val login = api.post("login.php", JSONObject().put("kind", "inspector").put("username", name).put("password", pass))
-                val token = login.getString("token")
+                val loginResponse = api.post("login.php", JSONObject().put("kind", "inspector").put("username", name).put("password", pass))
+                val token = loginResponse.getString("token")
                 val req = JSONObject()
                     .put("device_id", deviceId())
                     .put("public_key_pem", keys.publicKeyPem())
                     .put("device_name", "${Build.MANUFACTURER} ${Build.MODEL}".take(190))
                     .put("app_version", BuildConfig.VERSION_NAME)
-                val result = api.post("mobile_activate_authenticated.php", req, token)
                 accountToken = token
-                result
+                api.post("mobile_activate_authenticated.php", req, token)
             }) { response ->
                 store.putString("request_id", response.getString("request_id"))
                 showPending()
                 if (response.optString("status") == "approved") checkApproval()
             }
         }
+        login.setIconResource(R.drawable.ic_chevron)
+        login.iconTint = ColorStateList.valueOf(Color.rgb(246, 196, 76))
+        login.iconPadding = dp(12)
+        login.iconGravity = MaterialButton.ICON_GRAVITY_END
+        gap(5)
+        if (store.biometricEnabled() && biometricsAvailable()) {
+            val bio = secondaryButton("ورود با اثر انگشت") { showBiometricLock() }
+            bio.setIconResource(R.drawable.ic_fingerprint)
+            bio.iconTint = ColorStateList.valueOf(navy)
+            bio.iconGravity = MaterialButton.ICON_GRAVITY_END
+        } else {
+            val note = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+                setPadding(dp(10), dp(11), dp(10), dp(11))
+            }
+            note.addView(icon(R.drawable.ic_shield, gold, 18))
+            note.addView(text("پس از ورود اولیه می‌توانید ورود با اثر انگشت را فعال کنید.", 11, false, muted).apply {
+                gravity = Gravity.CENTER; setPadding(dp(7), 0, 0, 0)
+            })
+            content.addView(note)
+        }
+        gap(6)
         val securityNote = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             setPadding(dp(12), dp(11), dp(12), dp(11))
             background = rounded(Color.rgb(239, 244, 249), 12)
         }
         securityNote.addView(icon(R.drawable.ic_shield, navy, 20))
-        securityNote.addView(text("رمز عبور روی دستگاه ذخیره نمی‌شود؛ ورود اولیه به اینترنت نیاز دارد.", 11, false, muted).apply {
+        securityNote.addView(text("ورود رمزنگاری‌شده است؛ رمز عبور در گوشی ذخیره نمی‌شود.", 11, false, muted).apply {
             setPadding(dp(9), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         content.addView(securityNote)
         if (store.getString("request_id") != null) {
             gap(10)
-            secondaryButton("پیگیری درخواست فعال‌سازی") { showPending() }
+            secondaryButton("پیگیری درخواست فعال‌سازی دستگاه") { showPending() }
         }
     }
 
@@ -1043,17 +1209,29 @@ class MainActivity : AppCompatActivity() {
                     if (available.isNotEmpty()) showMission(available.first())
                     else showHome("missions")
                 }
-                val authorizedCount = serverSnapshot.optJSONArray("authorized_organizations")?.length() ?: 0
-                secondaryButton("فهرست ادارات مجاز من (${authorizedCount})") { showHome("departments") }
-                val batch = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", false) {
-                    if (queued.isEmpty()) showHome("drafts") else sendAllQueued()
+                val actionsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
                 }
-                batch.setIconResource(R.drawable.ic_send_all)
-                content.addView(batch)
-                if (queued.isNotEmpty()) secondaryButton("نمایش صف ارسال و خطاها") { showOutbox() }
-                val official = makeButton("گزارش رسمی | دریافت PDF", false) { showOfficialReports() }
-                official.setIconResource(R.drawable.ic_official_report)
-                content.addView(official)
+                actionsRow.addView(quickActionCard("گزارش رسمی", "مشاهده و دریافت PDF", R.drawable.ic_official_report) {
+                    showOfficialReports()
+                }, LinearLayout.LayoutParams(0, dp(118), 1f).apply { marginEnd = dp(5) })
+                actionsRow.addView(quickActionCard("امضای دیجیتال", "بررسی پیش‌نویس‌ها", R.drawable.ic_signature) {
+                    showHome("drafts")
+                }, LinearLayout.LayoutParams(0, dp(118), 1f).apply { marginStart = dp(5) })
+                content.addView(actionsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(118)).apply {
+                    topMargin = dp(9); bottomMargin = dp(9)
+                })
+                val authorizedCount = serverSnapshot.optJSONArray("authorized_organizations")?.length() ?: 0
+                secondaryButton("ادارات مجاز من  •  ${authorizedCount}") { showHome("departments") }
+                if (queued.isNotEmpty()) {
+                    val batch = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", false) {
+                        sendAllQueued()
+                    }
+                    batch.setIconResource(R.drawable.ic_send_all)
+                    content.addView(batch)
+                    secondaryButton("نمایش صف ارسال و خطاها") { showOutbox() }
+                }
                 val supervisor = serverSnapshot.optJSONObject("supervisor")
                 if (supervisor?.optBoolean("can_review", false) == true) {
                     val pendingCount = supervisor.optJSONArray("items")?.length() ?: 0
@@ -2791,20 +2969,40 @@ class MainActivity : AppCompatActivity() {
         }catch(_ :Exception) {notifyShort("فعالسازی اثرانگشت ممکن نشد")}
     }
     private fun showBiometricLock() {
-        screen("ورود ایمن", "دسترسی با تأیید هویت دستگاه")
-        label("برای مشاهده مأموریت‌ها، اثر انگشت خود را تأیید کنید.",14,false,muted)
-        gap(18)
-        button("ورود با اثرانگشت") {
-            if(!biometricsAvailable()) {notifyShort("اثر انگشت قوی در دسترس نیست");return@button}
-            try {
-                val cipher=store.bioDecryptCipher() ?: error("token missing")
-                biometricPrompt("ورود با اثرانگشت",cipher) { authorized ->
-                    try { deviceToken=store.decryptBio(authorized);showHome();connectAndSync() }
-                    catch (_:Exception) {notifyShort("کلید دستگاه نامعتبر است؛ ورود مجدد لازم است");showLogin()}
-                }
-            } catch (_: Exception) {notifyShort("اطلاعات بیومتریک نیازمند فعال‌سازی مجدد است");showLogin()}
+        authScreen()
+        val panel = MaterialCardView(this).apply {
+            radius = dp(22).toFloat(); strokeWidth = dp(1); strokeColor = line
+            cardElevation = dp(2).toFloat(); setCardBackgroundColor(Color.WHITE)
         }
-        secondaryButton("ورود با نام کاربری و رمز عبور") { showLogin() }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            setPadding(dp(22), dp(25), dp(22), dp(24))
+        }
+        val fingerprint = MaterialCardView(this).apply {
+            radius = dp(42).toFloat(); strokeWidth = dp(2); strokeColor = gold
+            cardElevation = dp(3).toFloat(); setCardBackgroundColor(Color.rgb(247, 242, 230))
+        }
+        fingerprint.addView(icon(R.drawable.ic_fingerprint, navy, 54),
+            FrameLayout.LayoutParams(dp(62), dp(62), Gravity.CENTER))
+        body.addView(fingerprint, LinearLayout.LayoutParams(dp(92), dp(92)).apply { bottomMargin = dp(17) })
+        body.addView(text("تأیید هویت", 22, true, navy).apply { gravity = Gravity.CENTER })
+        body.addView(text("برای ورود امن، اثر انگشت خود را تأیید کنید.", 13, false, muted).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(18))
+        })
+        panel.addView(body)
+        content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        gap(18)
+        button("تأیید و ورود") {
+            if (!biometricsAvailable()) { notifyShort("اثر انگشت قوی در تنظیمات دستگاه فعال نیست"); return@button }
+            try {
+                val cipher = store.bioDecryptCipher() ?: error("token missing")
+                biometricPrompt("ورود با اثر انگشت", cipher) { authorized ->
+                    try { deviceToken = store.decryptBio(authorized); showHome(); connectAndSync() }
+                    catch (_: Exception) { notifyShort("کلید دستگاه نامعتبر است؛ ورود مجدد لازم است"); showLogin() }
+                }
+            } catch (_: Exception) { notifyShort("اطلاعات بیومتریک نیازمند فعال‌سازی مجدد است"); showLogin() }
+        }
+        secondaryButton("بازگشت به ورود با رمز عبور") { showLogin() }
     }
     private fun confirmLogout() {
         AlertDialog.Builder(this).setTitle("خروج")

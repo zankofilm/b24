@@ -14,8 +14,8 @@ android {
         applicationId = "ir.bazr.inspection"
         minSdk = 30
         targetSdk = 35
-        versionCode = 18
-        versionName = "4.11.0-section-pages"
+        versionCode = 19
+        versionName = "4.12.0-professional-brand-ui"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     buildFeatures { buildConfig = true }
