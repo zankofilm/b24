@@ -17,12 +17,12 @@ class SignedDraft(private val store: SecureStore) {
             .put("signature_png_base64", Base64.encodeToString(png, Base64.NO_WRAP))
             .put("draft_sha256", checksum(d))
             .put("signed_at", Instant.now().toString())
-        store.save("signed_draft:${d.key}", record.toString())
+        store.saveDurable("signed_draft:${d.key}", record.toString())
     }
     fun get(d: InspectionDraft): JSONObject? = store.load("signed_draft:${d.key}")?.let {
         runCatching { JSONObject(it) }.getOrNull()?.takeIf { record ->
             record.optString("draft_sha256") == checksum(d) && record.optString("signature_png_base64").isNotBlank()
         }
     }
-    fun clear(key: String) = store.clear("signed_draft:$key")
+    fun clear(key: String) = store.clearDurable("signed_draft:$key")
 }

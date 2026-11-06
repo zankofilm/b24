@@ -10,16 +10,17 @@ object AssessmentRules {
     ) {
         val coveragePercent: Double get() = if (total == 0) 0.0 else answered * 100.0 / total
     }
+
     fun evaluate(questionIds: List<String>, rawScores: Map<String, String>): Summary {
-        val ids = questionIds.filter { it.isNotBlank() }.distinct()
+        val ids = questionIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         val unanswered = mutableListOf<String>()
         val invalid = mutableListOf<String>()
         var answered = 0
         for (id in ids) {
-            val score = rawScores[id].orEmpty()
-            if (score.isBlank()) { unanswered.add(id); continue }
-            val number = score.toDoubleOrNull()
-            if (number == null || !number.isFinite() || number !in 0.0..100.0) invalid.add(id)
+            val raw = rawScores[id].orEmpty()
+            if (raw.isBlank()) { unanswered.add(id); continue }
+            val number = ScoreInput.parse(raw)
+            if (number == null || number !in 0.0..100.0) invalid.add(id)
             else answered++
         }
         return Summary(ids.size, answered, unanswered.sorted(), invalid.sorted())

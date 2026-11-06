@@ -45,6 +45,10 @@ import androidx.activity.OnBackPressedCallback
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textfield.TextInputLayout
@@ -96,7 +100,6 @@ class MainActivity : AppCompatActivity() {
             }) { notifyShort("PDF رسمی از سرور دریافت و ذخیره شد") }
         }
     }
-    private var accountToken: String? = null  // Web login token: never persisted.
     private var deviceToken: String? = null   // In-memory after normal or biometric unlock.
     private var sessionToken: String? = null  // Short-lived mobile bearer.
     private var serverSnapshot = JSONObject()
@@ -148,12 +151,12 @@ class MainActivity : AppCompatActivity() {
     }
     private val evidencePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val question = store.load("pending_picker_question")
-        store.clear("pending_picker_question")
+        store.clearDurable("pending_picker_question")
         if (uri != null && !question.isNullOrBlank()) importEvidence(uri, question, false)
     }
     private val cameraCapture = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val pending = store.load("pending_capture")?.let { runCatching { JSONObject(it) }.getOrNull() }
-        store.clear("pending_capture")
+        store.clearDurable("pending_capture")
         if (pending != null) {
             val name = pending.optString("name")
             val question = pending.optString("question")
@@ -180,9 +183,13 @@ class MainActivity : AppCompatActivity() {
                     evidenceVault.delete(reference)
                     notifyShort("برای هر سؤال حداکثر چهار مستند مستقل مجاز است")
                 } else {
-                    draft.save()
-                    selectedMission?.let { showMission(it, currentQuestionIndex) }
-                    notifyShort("مستند جدید به گاوصندوق رمزنگاری‌شده افزوده شد")
+                    if (saveDraftSafely(draft)) {
+                        selectedMission?.let { showMission(it, currentQuestionIndex) }
+                        notifyShort("مستند جدید به گاوصندوق رمزنگاری‌شده افزوده شد")
+                    } else {
+                        EvidenceRefs.remove(draft.attachments, question, reference)
+                        evidenceVault.delete(reference)
+                    }
                 }
             }
         }
@@ -192,11 +199,11 @@ class MainActivity : AppCompatActivity() {
         val cameraDir = File(cacheDir, "camera").apply { mkdirs() }
         val name = "capture-${UUID.randomUUID()}.jpg"
         val photo = File(cameraDir, name)
-        store.save("pending_capture", JSONObject().put("name", name).put("question", question).toString())
+        store.saveDurable("pending_capture", JSONObject().put("name", name).put("question", question).toString())
         try {
             cameraCapture.launch(FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", photo))
         } catch (_: Exception) {
-            store.clear("pending_capture")
+            store.clearDurable("pending_capture")
             photo.delete()
             notifyShort("برنامه دوربین در این دستگاه در دسترس نیست")
         }
@@ -205,11 +212,11 @@ class MainActivity : AppCompatActivity() {
     /** Launch Android's real file picker, not an instructional pop-up. */
     private fun launchEvidencePicker(question: String) {
         if (question.isBlank()) { notifyShort("شناسه سؤال نامعتبر است"); return }
-        store.save("pending_picker_question", question)
+        store.saveDurable("pending_picker_question", question)
         try {
             evidencePicker.launch(arrayOf("image/*", "application/pdf"))
         } catch (error: Exception) {
-            store.clear("pending_picker_question")
+            store.clearDurable("pending_picker_question")
             AlertDialog.Builder(this)
                 .setTitle("باز کردن گالری ناموفق بود")
                 .setMessage("در این گوشی برنامه انتخاب فایل در دسترس نیست. لطفاً یک گالری یا فایل‌منیجر نصب یا فعال کنید.")
@@ -231,6 +238,7 @@ class MainActivity : AppCompatActivity() {
         keys = DeviceKeys()
         api = ApiClient(BuildConfig.API_BASE_URL)
         evidenceVault = EvidenceVault(this, store)
+        evidenceVault.cleanupOrphans()
         outbox = SubmissionQueue(store)
         receiptHistory = ReceiptHistory(store)
         signatures = SignedDraft(store)
@@ -238,7 +246,7 @@ class MainActivity : AppCompatActivity() {
         val pendingName = store.load("pending_capture")?.let { runCatching { JSONObject(it).optString("name") }.getOrNull() }
         File(cacheDir, "camera").listFiles()?.filter { it.name != pendingName && it.lastModified() < System.currentTimeMillis() - 86_400_000L }
             ?.forEach { it.delete() }
-        store.getString("device_id") ?: store.putString("device_id", UUID.randomUUID().toString())
+        store.getString("device_id") ?: store.putStringDurable("device_id", UUID.randomUUID().toString())
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (selectedMission != null) showHome("missions")
@@ -263,9 +271,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onDestroy() { io.shutdown(); super.onDestroy() }
+    override fun onDestroy() {
+        dismissTransferDialog()
+        io.shutdown()
+        super.onDestroy()
+    }
     private fun deviceId() = store.getString("device_id") ?: error("missing device ID")
     private fun notifyShort(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+
+    private fun saveDraftSafely(draft: InspectionDraft): Boolean {
+        if (draft.integrityError) return false
+        return try {
+            draft.save()
+            true
+        } catch (error: Exception) {
+            notifyShort(AppErrorMessages.forUser(error))
+            false
+        }
+    }
     private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
     private fun faDigits(value: String): String = value.map { c ->
         if (c in '0'..'9') ('۰'.code + (c - '0')).toChar() else c
@@ -289,10 +312,6 @@ class MainActivity : AppCompatActivity() {
     }
     /** Native app shell: approved white institutional header, scrollable content and light bottom navigation. */
     private fun screen(title: String, subtitle: String, withNav: Boolean = false): LinearLayout {
-        window.statusBarColor = navy
-        window.navigationBarColor = Color.WHITE
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
@@ -320,10 +339,58 @@ class MainActivity : AppCompatActivity() {
         shell.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         if (withNav) shell.addView(bottomNavigation())
         setContentView(shell)
+        applyShellInsets(shell)
         if (title.isNotBlank()) label(title, 21, true, navy)
         if (subtitle.isNotBlank()) label(subtitle, 12, false, muted)
         if (title.isNotBlank() || subtitle.isNotBlank()) gap(10)
         return content
+    }
+
+    /** Draw system bars deliberately so Android 15 edge-to-edge does not cover controls. */
+    private fun applyShellInsets(root: LinearLayout) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.statusBarContrastEnforced = false
+        window.navigationBarContrastEnforced = false
+        val baseLeft = root.paddingLeft
+        val baseTop = root.paddingTop
+        val baseRight = root.paddingRight
+        val baseBottom = root.paddingBottom
+        val topScrim = View(this).apply { setBackgroundColor(navy) }
+        val bottomScrim = View(this).apply { setBackgroundColor(Color.WHITE) }
+        root.addView(topScrim, 0, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
+        root.addView(bottomScrim, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            topScrim.layoutParams = topScrim.layoutParams.apply { height = safe.top }
+            bottomScrim.layoutParams = bottomScrim.layoutParams.apply { height = safe.bottom }
+            root.setPadding(safe.left + baseLeft, baseTop, safe.right + baseRight, baseBottom)
+            insets
+        }
+        WindowInsetsControllerCompat(window, root).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = true
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun applySplashInsets(root: FrameLayout) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.statusBarContrastEnforced = false
+        window.navigationBarContrastEnforced = false
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            insets
+        }
+        WindowInsetsControllerCompat(window, root).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+        ViewCompat.requestApplyInsets(root)
     }
 
     /** Approved 4.2 toolbar: white surface, gold shield and a compact role chip. */
@@ -393,9 +460,6 @@ class MainActivity : AppCompatActivity() {
     private fun authScreen(): LinearLayout = screen("", "", withNav = false)
 
     private fun showSplash(next: () -> Unit) {
-        window.statusBarColor = Color.rgb(4, 22, 41)
-        window.navigationBarColor = Color.rgb(4, 22, 41)
-        window.decorView.systemUiVisibility = 0
         val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(4, 22, 41)) }
         val banner = ImageView(this).apply {
             setImageResource(R.drawable.official_brand_banner)
@@ -437,6 +501,7 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(center, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)
+        applySplashInsets(root)
         Handler(Looper.getMainLooper()).postDelayed({ if (!isFinishing && !isDestroyed) next() }, 1250L)
     }
 
@@ -740,7 +805,10 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     busy = false
                     loadingBar?.visibility = View.GONE
-                    if (!isFinishing && !isDestroyed) done(result)
+                    if (!isFinishing && !isDestroyed) {
+                        try { done(result) }
+                        catch (callbackError: Exception) { notifyShort(AppErrorMessages.forUser(callbackError)) }
+                    }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -781,7 +849,18 @@ class MainActivity : AppCompatActivity() {
         sectionTitle("اطلاعات ورود")
         val remembered = store.getString("remembered_username").orEmpty()
         val username = field("نام کاربری", remembered)
+        username.setAutofillHints(View.AUTOFILL_HINT_USERNAME)
         val password = field("رمز عبور", password = true)
+        password.setAutofillHints(View.AUTOFILL_HINT_PASSWORD)
+        val rememberUsername = CheckBox(this).apply {
+            text = "ذخیره نام کاربری روی این دستگاه"
+            textSize = 12f
+            setTextColor(muted)
+            isChecked = remembered.isNotBlank()
+            buttonTintList = ColorStateList.valueOf(gold)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        content.addView(rememberUsername, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)))
         button("ورود امن و ثبت دستگاه") {
             val name = username.text.toString().trim()
             val pass = password.text.toString()
@@ -789,6 +868,7 @@ class MainActivity : AppCompatActivity() {
                 notifyShort("نام کاربری و رمز عبور را وارد کنید")
                 return@button
             }
+            val remember = rememberUsername.isChecked
             work({
                 val loginResponse = api.post("login.php", JSONObject().put("kind", "inspector").put("username", name).put("password", pass))
                 val token = loginResponse.getString("token")
@@ -797,10 +877,11 @@ class MainActivity : AppCompatActivity() {
                     .put("public_key_pem", keys.publicKeyPem())
                     .put("device_name", "${Build.MANUFACTURER} ${Build.MODEL}".take(190))
                     .put("app_version", BuildConfig.VERSION_NAME)
-                accountToken = token
                 api.post("mobile_activate_authenticated.php", req, token)
             }) { response ->
-                store.putString("request_id", response.getString("request_id"))
+                if (remember) store.putString("remembered_username", name)
+                else store.removeString("remembered_username")
+                store.putStringDurable("request_id", response.getString("request_id"))
                 showPending()
                 if (response.optString("status") == "approved") checkApproval()
             }
@@ -876,13 +957,22 @@ class MainActivity : AppCompatActivity() {
                     val fresh = response.getString("device_token")
                     // Status checks rotate the device token; discard any old biometric binding.
                     store.clearBio()
-                    store.save("device_token", fresh)
+                    store.saveDurable("device_token", fresh)
+                    store.removeStringDurable("request_id")
                     deviceToken = fresh
                     notifyShort("دستگاه تأیید شد")
                     showHome("home")
                     connectAndSync()
                 }
-                "revoked" -> { store.clear("device_token"); store.clearBio(); showPending(); notifyShort("دستگاه لغو شده است") }
+                "revoked" -> {
+                    deviceToken = null
+                    sessionToken = null
+                    store.clearDurable("device_token")
+                    store.clearBio()
+                    store.removeStringDurable("request_id")
+                    showLogin()
+                    notifyShort("دسترسی این دستگاه لغو شده است؛ برای فعال‌سازی دوباره وارد شوید")
+                }
                 else -> notifyShort("در انتظار تأیید مدیر")
             }
         }
@@ -893,12 +983,17 @@ class MainActivity : AppCompatActivity() {
         return api.post("mobile_session.php", body).getString("token")
     }
     private fun connectAndSync() {
-        val token=deviceToken ?: return
+        val token = deviceToken ?: return
+        sessionToken = null
+        if (activeTab == "home") showHome("home")
         work({
             val session = sessionFor(token)
             val payload = api.get("mobile_sync.php", session)
             val supervisorInbox = try { api.get("mobile_supervisor_inbox.php", session) }
-                catch (_: Exception) { JSONObject().put("ok", true).put("can_review", false).put("items", JSONArray()) }
+                catch (error: ApiException) {
+                    if (error.status in setOf(403, 404)) JSONObject().put("ok", true).put("can_review", false).put("items", JSONArray())
+                    else throw error
+                }
             payload.put("supervisor", supervisorInbox)
             Pair(session, payload)
         }) { (session, payload) ->
@@ -928,7 +1023,7 @@ class MainActivity : AppCompatActivity() {
         mission.optString("_server_key", mission.optString("id"))
 
     private fun missionDraft(mission: JSONObject): Boolean =
-        missionKey(mission).let { it.isNotBlank() && store.load("draft:$it") != null }
+        missionKey(mission).let { it.isNotBlank() && store.hasEncryptedRecord("draft:$it") }
 
     private fun reportCount(): Int = (serverSnapshot.optJSONArray("reports") ?: JSONArray()).length()
 
@@ -940,7 +1035,7 @@ class MainActivity : AppCompatActivity() {
         val draft = InspectionDraft(missionKey(mission), store)
         val answered = (0 until total).count { index ->
             val key = questions.optJSONObject(index)?.optString("id") ?: ""
-            val value = draft.answers.optString(key).toDoubleOrNull()
+            val value = ScoreInput.parse(draft.answers.optString(key))
             key.isNotBlank() && value != null && value in 0.0..100.0
         }
         return Pair(answered, total)
@@ -1062,7 +1157,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val evidence = evidenceVault.read(reference, contentResolver)
             if (evidence.mime.startsWith("image/")) {
-                val bitmap = evidenceVault.imagePreview(reference, contentResolver)
+                val bitmap = evidenceVault.imagePreview(evidence)
                     ?: throw IllegalStateException("پیش‌نمایش عکس ایجاد نشد")
                 val preview = ImageView(this).apply {
                     setImageBitmap(bitmap)
@@ -1071,7 +1166,10 @@ class MainActivity : AppCompatActivity() {
                     setPadding(dp(12),dp(12),dp(12),dp(12))
                 }
                 AlertDialog.Builder(this).setTitle("پیش‌نمایش مستند")
-                    .setView(preview).setPositiveButton("بستن", null).show()
+                    .setView(preview).setPositiveButton("بستن", null).create().also { dialog ->
+                        dialog.setOnDismissListener { preview.setImageDrawable(null); if (!bitmap.isRecycled) bitmap.recycle() }
+                        dialog.show()
+                    }
             } else {
                 AlertDialog.Builder(this).setTitle("مستند PDF")
                     .setMessage("${evidenceVault.metadata(reference)}\n\nفایل به‌صورت رمزنگاری‌شده در خود برنامه نگهداری و هنگام ارسال بارگذاری می‌شود.")
@@ -1389,6 +1487,7 @@ class MainActivity : AppCompatActivity() {
                     val pending = outbox.get(key)
                     val draft = InspectionDraft(key, store)
                     val status = when {
+                        draft.integrityError -> "خطای بازیابی امن · بازنویسی متوقف شده است"
                         pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
                         pending != null -> "امضاشده · آماده ارسال"
                         draft.validate(mission).isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
@@ -1760,6 +1859,14 @@ class MainActivity : AppCompatActivity() {
         selectedMission = mission
         selectedMissionKey = key
         val draft = if (openDraft?.key == key) openDraft!! else InspectionDraft(key, store)
+        if (draft.integrityError) {
+            openDraft = null
+            selectedMission = null
+            AlertDialog.Builder(this).setTitle("پیش‌نویس قابل بازیابی نیست")
+                .setMessage("اطلاعات رمزنگاری‌شده این مأموریت موجود است اما اعتبارسنجی یا رمزگشایی آن ناموفق بود. برای جلوگیری از بازنویسی و حذف احتمالی اطلاعات، ویرایش و ارسال متوقف شد.")
+                .setPositiveButton("متوجه شدم", null).show()
+            return
+        }
         openDraft = draft
         val enabled = mission.optBoolean("can_execute", false)
         val snapshot = mission.optJSONObject("checklistSnapshot") ?: JSONObject()
@@ -1846,7 +1953,7 @@ class MainActivity : AppCompatActivity() {
                 if (serverToday.isNotBlank()) " · تاریخ سرور: $serverToday" else "",
                 12, true, Color.rgb(157, 99, 29))
             secondaryButton("به‌روزرسانی وضعیت و مجوز مأموریت") {
-                draft.save()
+                if (!saveDraftSafely(draft)) return@secondaryButton
                 showHome("missions")
                 connectAndSync()
             }
@@ -1855,7 +1962,7 @@ class MainActivity : AppCompatActivity() {
         val validAnswers = draft.answeredCount(mission)
         val sectionAnswered = page.questionIndices.count { idx ->
             val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
-            val value = draft.answers.optString(qid).toDoubleOrNull()
+            val value = ScoreInput.parse(draft.answers.optString(qid))
             value != null && value.isFinite() && value in 0.0..100.0
         }
 
@@ -1942,7 +2049,7 @@ class MainActivity : AppCompatActivity() {
             val filledAll = draft.answeredCount(mission)
             val filledSection = page.questionIndices.count { idx ->
                 val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
-                val value = draft.answers.optString(qid).toDoubleOrNull()
+                val value = ScoreInput.parse(draft.answers.optString(qid))
                 value != null && value.isFinite() && value in 0.0..100.0
             }
             overallProgress.progress = filledAll
@@ -2033,7 +2140,7 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(9), 0, dp(9), 0)
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             val existingScore = draft.answers.optString(id)
-            val scoreValue = existingScore.toDoubleOrNull()
+            val scoreValue = ScoreInput.parse(existingScore)
             val state = TextView(this).apply {
                 text = if (scoreValue != null && scoreValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
                 textSize = 10f
@@ -2050,10 +2157,11 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 0, 0, dp(5))
             })
             val scoreInput = addInput(inside, "امتیاز این بند", existingScore, true, false) { value ->
-                draft.answers.put(id, value)
+                val normalizedScore = ScoreInput.normalize(value)
+                draft.answers.put(id, normalizedScore)
                 draft.clearAcknowledgement()
-                draft.save()
-                val numericValue = value.toDoubleOrNull()
+                saveDraftSafely(draft)
+                val numericValue = ScoreInput.parse(normalizedScore)
                 state.text = if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
                 state.setTextColor(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31))
                 state.background = rounded(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(229, 246, 237) else Color.rgb(250, 243, 226), 30)
@@ -2086,7 +2194,7 @@ class MainActivity : AppCompatActivity() {
             ).apply { bottomMargin = dp(10) })
             addInput(inside, "توضیحات و دلایل ارزیابی (در صورت نیاز)", draft.notes.optString(id), false, true) { value ->
                 draft.notes.put(id, value)
-                draft.save()
+                saveDraftSafely(draft)
             }
 
             val attached = EvidenceRefs.references(draft.attachments, id)
@@ -2134,8 +2242,12 @@ class MainActivity : AppCompatActivity() {
                         .setNegativeButton("انصراف", null)
                         .setPositiveButton("حذف مستند") { _, _ ->
                             if (EvidenceRefs.remove(draft.attachments, id, reference)) {
-                                draft.save()
-                                if (reference !in EvidenceRefs.all(draft.attachments)) evidenceVault.delete(reference)
+                                if (saveDraftSafely(draft)) {
+                                    if (reference !in EvidenceRefs.all(draft.attachments)) evidenceVault.delete(reference)
+                                } else {
+                                    EvidenceRefs.add(draft.attachments, id, reference)
+                                    return@setPositiveButton
+                                }
                             }
                             showMission(mission, globalIndex)
                         }.show()
@@ -2155,7 +2267,7 @@ class MainActivity : AppCompatActivity() {
             11, false, muted)
 
         fun openReview() {
-            draft.save()
+            if (!saveDraftSafely(draft)) return
             if (!enabled) {
                 AlertDialog.Builder(this)
                     .setTitle("مأموریت هنوز برای ارسال فعال نیست")
@@ -2194,7 +2306,7 @@ class MainActivity : AppCompatActivity() {
         val nextCaption = if (currentSectionIndex < pages.lastIndex) "شاخص بعدی" else "مرور گزارش"
         val next = makeButton(nextCaption, true) {
             if (currentSectionIndex < pages.lastIndex) {
-                draft.save()
+                if (!saveDraftSafely(draft)) return@makeButton
                 showMission(mission, pages[currentSectionIndex + 1].questionIndices.first())
             } else openReview()
         }.apply { textSize = 12f }
@@ -2281,7 +2393,8 @@ class MainActivity : AppCompatActivity() {
         }
         val missing = draft.unscoredIds(mission)
         if (missing.isEmpty()) {
-            draft.clearAcknowledgement(); draft.save()
+            draft.clearAcknowledgement()
+            if (!saveDraftSafely(draft)) return
             showSignatureScreen(mission, draft)
             return
         }
@@ -2304,7 +2417,7 @@ class MainActivity : AppCompatActivity() {
             }
             .setPositiveButton("بله، ادامه و امضا") { _, _ ->
                 draft.acknowledgeUnscored(mission)
-                showSignatureScreen(mission, draft)
+                if (saveDraftSafely(draft)) showSignatureScreen(mission, draft)
             }.show()
     }
 
@@ -2314,8 +2427,6 @@ class MainActivity : AppCompatActivity() {
             askBeforeSignature(mission, draft); return
         }
         // A dedicated Native touch canvas, filling the available app height.
-        window.statusBarColor = navy
-        window.navigationBarColor = Color.WHITE
         shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
@@ -2360,7 +2471,7 @@ class MainActivity : AppCompatActivity() {
                 notifyShort("اطلاعات گزارش تغییر کرده؛ لطفاً دوباره بررسی کنید")
                 showReportReview(mission, draft)
             } else try {
-                draft.save()
+                if (!saveDraftSafely(draft)) return@makeButton
                 signatures.save(draft, signaturePad.toPng())
                 outbox.enqueue(mission, draft)
                 showOutbox()
@@ -2374,6 +2485,7 @@ class MainActivity : AppCompatActivity() {
             showReportReview(mission, draft)
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
         setContentView(shell)
+        applyShellInsets(shell)
     }
 
     /** Native, modal progress UI: reports transmitted bytes, stages and the active file. */
@@ -2503,9 +2615,11 @@ class MainActivity : AppCompatActivity() {
             val key = item.optString("mission_key")
             val mission = item.optJSONObject("mission") ?: JSONObject()
             val state = item.optString("state")
-            val status = when (state) {
-                "failed" -> "نیازمند تلاش مجدد"
-                "uploading" -> "ارسال ناتمام؛ قابل تکرار"
+            val integrityError = item.optBoolean("integrity_error")
+            val status = when {
+                integrityError -> "خطای بازیابی امن؛ ارسال متوقف شده است"
+                state == "failed" -> "نیازمند تلاش مجدد"
+                state == "uploading" -> "ارسال ناتمام؛ قابل تکرار"
                 else -> "در انتظار ارسال"
             }
             val panel = LinearLayout(this).apply {
@@ -2520,6 +2634,18 @@ class MainActivity : AppCompatActivity() {
             val attempts = item.optInt("attempts", 0)
             if (attempts > 0) panel.addView(text("تعداد تلاش‌های ارسال: $attempts", 11, false, muted))
             if (item.optString("error").isNotBlank()) panel.addView(text("آخرین خطا: ${item.optString("error")}", 11, false, muted))
+            if (integrityError) {
+                panel.addView(text("برای جلوگیری از ارسال ناقص یا حذف داده‌ها، این رکورد فقط‌خواندنی شده است. اطلاعات پیش‌نویس و مستندات حذف نشده‌اند.", 12, true, Color.rgb(150, 96, 31)))
+                panel.addView(makeButton("حذف فقط رکورد خراب از صف", false) {
+                    AlertDialog.Builder(this).setTitle("حذف رکورد خراب")
+                        .setMessage("فقط اطلاعات صف ارسال حذف می‌شود؛ پیش‌نویس و مستندات رمزنگاری‌شده دست‌نخورده می‌مانند. پس از آن، در صورت سالم بودن پیش‌نویس می‌توانید دوباره آن را مرور و امضا کنید.")
+                        .setNegativeButton("انصراف", null)
+                        .setPositiveButton("حذف رکورد صف") { _, _ -> outbox.remove(key); showOutbox() }
+                        .show()
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(10) })
+                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+                return@forEach
+            }
             val launch = makeButton("ارسال اکنون", true) { sendQueued(key) }
             launch.setIconResource(R.drawable.ic_send)
             launch.iconTint = ColorStateList.valueOf(Color.WHITE)
@@ -2681,7 +2807,7 @@ class MainActivity : AppCompatActivity() {
             val response = result.first
             if (response != null) {
                 if (onFinished == null) dismissTransferDialog()
-                store.save("receipt:$key", response.toString())
+                store.saveDurable("receipt:$key", response.toString())
                 // A local history write failure must not turn a server-confirmed success into a retry.
                 runCatching { receiptHistory.save(mission, draft, response) }
                 EvidenceRefs.all(draft.attachments).forEach { evidenceVault.delete(it) }
@@ -2808,15 +2934,17 @@ class MainActivity : AppCompatActivity() {
             inner.addView(text(organization, 16, true, navy))
             inner.addView(text("شماره رسید: ${report.optString("receipt_code", "ثبت‌شده")}", 13, false, ink))
             inner.addView(text("تاریخ: ${report.optString("submitted_at", "نامشخص")}", 12, false, muted))
-            val status = when (report.optString("review_status")) {
-                "approved", "accepted" -> "تأیید نهایی مدیریت ثبت شده"
-                "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
-                "admin_review", "pending_review" -> "در انتظار تأیید سربازرس"
-                "rejected", "returned" -> "برای اصلاح به بازرس برگشت داده شد"
+            val integrityError = report.optBoolean("integrity_error")
+            val status = when {
+                integrityError -> "نسخه محلی رسید قابل بازیابی نیست؛ وضعیت را از سرور همگام کنید"
+                report.optString("review_status") in setOf("approved", "accepted") -> "تأیید نهایی مدیریت ثبت شده"
+                report.optString("review_status") == "supervisor_approved" -> "تأیید سربازرس؛ در انتظار مدیریت"
+                report.optString("review_status") in setOf("admin_review", "pending_review") -> "در انتظار تأیید سربازرس"
+                report.optString("review_status") in setOf("rejected", "returned") -> "برای اصلاح به بازرس برگشت داده شد"
                 else -> if (fromServer) "وضعیت بررسی ثبت نشده" else "رسید ذخیره‌شده محلی"
             }
-            inner.addView(text(status, 12, true, teal))
-            inner.addView(makeButton("مشاهده جزئیات", false) { showHistoryDetail(report, fromServer, organization) })
+            inner.addView(text(status, 12, true, if (integrityError) Color.rgb(163, 112, 42) else teal))
+            if (!integrityError) inner.addView(makeButton("مشاهده جزئیات", false) { showHistoryDetail(report, fromServer, organization) })
             card.addView(inner)
             content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
@@ -2841,9 +2969,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val key = report.optString("mission_key")
-        val detail = receiptHistory.find(key)?.takeIf { copy ->
+        val localCopy = receiptHistory.find(key)
+        val detail = localCopy?.takeIf { copy ->
             val localCode = copy.optString("receipt_code")
             localCode.isNotBlank() && localCode == report.optString("receipt_code")
+        }
+        if (detail == null && localCopy?.optBoolean("integrity_error") == true) {
+            gap(12)
+            val integrityMessage = localCopy.optString("integrity_message", "نسخه محلی رسید قابل بازیابی نیست")
+            label("$integrityMessage. وضعیت معتبر گزارش را از سرور همگام کنید.", 13, false, Color.rgb(163, 112, 42))
         }
         if (detail != null) {
             gap(12)
@@ -2987,10 +3121,11 @@ class MainActivity : AppCompatActivity() {
             .setMessage("از حساب خارج می‌شوید. پیش‌نویس‌های ذخیره‌شده روی دستگاه حذف نمی‌شوند. برای حذف کامل داده‌ها باید از تنظیمات اندروید اقدام کنید.")
             .setNegativeButton("انصراف",null)
             .setPositiveButton("خروج") { _,_ ->
-                deviceToken=null;sessionToken=null;accountToken=null
-                store.clear("device_token");store.clearBio()
-                store.clear("mobile_sync")
-                store.removeString("last_sync")
+                deviceToken=null;sessionToken=null
+                store.clearDurable("device_token");store.clearBio()
+                store.removeStringDurable("request_id")
+                store.clearDurable("mobile_sync")
+                store.removeStringDurable("last_sync")
                 serverSnapshot = JSONObject()
                 showLogin()
             }.show()

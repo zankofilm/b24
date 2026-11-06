@@ -22,25 +22,31 @@ class ApiClient(private val base: String) {
         idempotencyKey: String? = null, onProgress: ((Long, Long) -> Unit)? = null,
         onAwaitingResponse: (() -> Unit)? = null
     ): JSONObject {
-        val conn = open(path, "POST", bearer)
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        idempotencyKey?.let { conn.setRequestProperty("Idempotency-Key", it) }
-        conn.doOutput = true
-        val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
-        conn.setFixedLengthStreamingMode(bytes.size)
-        conn.outputStream.use { stream ->
-            var offset = 0
-            var lastPercent = -1
-            while (offset < bytes.size) {
-                val size = minOf(8192, bytes.size - offset)
-                stream.write(bytes, offset, size)
-                offset += size
-                val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
-                if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
+        val conn = open(path, "POST", bearer, readTimeoutMs = 60_000)
+        try {
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            idempotencyKey?.let {
+                require(it.matches(Regex("[A-Za-z0-9._:-]{8,128}"))) { "Invalid idempotency key" }
+                conn.setRequestProperty("Idempotency-Key", it)
             }
-        }
-        onAwaitingResponse?.invoke()
-        return read(conn)
+            conn.doOutput = true
+            val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
+            if (bytes.size > 4 * 1024 * 1024) throw UserActionException("حجم اطلاعات گزارش بیش از حد مجاز است")
+            conn.setFixedLengthStreamingMode(bytes.size)
+            conn.outputStream.use { stream ->
+                var offset = 0
+                var lastPercent = -1
+                while (offset < bytes.size) {
+                    val size = minOf(8192, bytes.size - offset)
+                    stream.write(bytes, offset, size)
+                    offset += size
+                    val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
+                    if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
+                }
+            }
+            onAwaitingResponse?.invoke()
+            return read(conn)
+        } finally { conn.disconnect() }
     }
 
     fun get(path: String, bearer: String): JSONObject = read(open(path, "GET", bearer))
@@ -115,15 +121,19 @@ class ApiClient(private val base: String) {
         } finally { conn.disconnect() }
     }
 
-    private fun open(path: String, method: String, bearer: String?): HttpURLConnection {
+    private fun open(
+        path: String, method: String, bearer: String?, readTimeoutMs: Int = 30_000
+    ): HttpURLConnection {
         require(path.matches(Regex("[A-Za-z0-9_/-]+\\.php(?:\\?[A-Za-z0-9_=&.-]+)?")))
         val url = URL(base + path)
         val conn = (url.openConnection() as HttpURLConnection)
         conn.instanceFollowRedirects = false
+        conn.useCaches = false
         conn.requestMethod = method
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 30_000
+        conn.connectTimeout = 20_000
+        conn.readTimeout = readTimeoutMs
         conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Cache-Control", "no-store")
         if (!bearer.isNullOrBlank()) conn.setRequestProperty("Authorization", "Bearer $bearer")
         return conn
     }
@@ -138,35 +148,41 @@ class ApiClient(private val base: String) {
         if (mime !in setOf("image/jpeg", "image/png", "image/webp", "application/pdf")) {
             throw UserActionException("نوع فایل پشتیبانی نمی‌شود")
         }
-        val fileName = displayName.replace(Regex("[\\r\\n\\\\\\\"]"), "_").take(100)
-        val boundary = "BAZR-" + UUID.randomUUID().toString()
-        val conn = open("mobile_upload.php", "POST", bearer)
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-        fun part(name: String, value: String): ByteArray =
-            ("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n")
-                .toByteArray(StandardCharsets.UTF_8)
-        val start = ByteArrayOutputStream()
-        start.write(part("mission_key", mission))
-        start.write(part("question_key", question))
-        start.write(part("file_kind", if (mime.startsWith("image/")) "image" else "document"))
-        start.write(("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\nContent-Type: $mime\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
-        val end = "\r\n--$boundary--\r\n".toByteArray()
-        conn.setFixedLengthStreamingMode(start.size() + bytes.size + end.size)
-        conn.outputStream.use { stream ->
-            stream.write(start.toByteArray())
-            var offset = 0
-            var lastPercent = -1
-            while (offset < bytes.size) {
-                val size = minOf(8192, bytes.size - offset)
-                stream.write(bytes, offset, size)
-                offset += size
-                val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
-                if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
-            }
-            stream.write(end)
+        if (mission.isBlank() || mission.length > 190 || mission.any { it.isISOControl() } ||
+            question.isBlank() || question.length > 190 || question.any { it.isISOControl() }) {
+            throw UserActionException("شناسه مأموریت یا بند ارزیابی معتبر نیست")
         }
-        return read(conn)
+        val fileName = displayName.replace(Regex("[\\r\\n\\\\/\"\u0000-\u001F]"), "_").take(100).ifBlank { "evidence" }
+        val boundary = "BAZR-" + UUID.randomUUID().toString()
+        val conn = open("mobile_upload.php", "POST", bearer, readTimeoutMs = 120_000)
+        try {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            fun part(name: String, value: String): ByteArray =
+                ("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n")
+                    .toByteArray(StandardCharsets.UTF_8)
+            val start = ByteArrayOutputStream()
+            start.write(part("mission_key", mission))
+            start.write(part("question_key", question))
+            start.write(part("file_kind", if (mime.startsWith("image/")) "image" else "document"))
+            start.write(("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\nContent-Type: $mime\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
+            val end = "\r\n--$boundary--\r\n".toByteArray()
+            conn.setFixedLengthStreamingMode(start.size() + bytes.size + end.size)
+            conn.outputStream.use { stream ->
+                stream.write(start.toByteArray())
+                var offset = 0
+                var lastPercent = -1
+                while (offset < bytes.size) {
+                    val size = minOf(8192, bytes.size - offset)
+                    stream.write(bytes, offset, size)
+                    offset += size
+                    val pct = (100L * offset / bytes.size.coerceAtLeast(1)).toInt()
+                    if (pct != lastPercent) { onProgress?.invoke(offset.toLong(), bytes.size.toLong()); lastPercent = pct }
+                }
+                stream.write(end)
+            }
+            return read(conn)
+        } finally { conn.disconnect() }
     }
 
     /** Bounded response parsing: do not expose server HTML or internal errors in the UI. */
