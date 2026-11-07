@@ -118,6 +118,7 @@ class MainActivity : AppCompatActivity() {
     private var activeTab = "home"
     private var currentQuestionIndex = 0
     private var currentSectionIndex = 0
+    private var checklistOverviewVisible = false
     /** Non-certified PDF data is kept in memory only while the system file picker is open. */
     private var pendingPdfExport: JSONObject? = null
     private val pdfFilePicker = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -253,7 +254,11 @@ class MainActivity : AppCompatActivity() {
         store.getString("device_id") ?: store.putStringDurable("device_id", UUID.randomUUID().toString())
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (selectedMission != null) showHome("missions")
+                if (checklistOverviewVisible && selectedMission != null) {
+                    val mission = selectedMission!!
+                    checklistOverviewVisible = false
+                    showMission(mission, currentQuestionIndex)
+                } else if (selectedMission != null) showHome("missions")
                 else if (activeTab == "outbox") showHome("drafts")
                 else if (activeTab != "home" && ::content.isInitialized) showHome("home")
                 else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
@@ -417,7 +422,7 @@ class MainActivity : AppCompatActivity() {
             else -> "سامانه بازرسی ادارات"
         }
         val backPages = setOf(
-            "مأموریت‌های من", "فرم بازرسی", "ثبت بازرسی", "بازبینی گزارش", "مرور گزارش",
+            "مأموریت‌های من", "فرم بازرسی", "ثبت بازرسی", "بازبینی گزارش", "مرور گزارش", "نمای کلی شاخص‌ها",
             "پیش‌نویس‌های من", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "سوابق بازرسی",
             "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "ارسال گزارش‌ها", "کارتابل سربازرس",
             "بررسی گزارش بازرس", "تأیید دستگاه", "اطلاعیه‌های سازمانی", "تأیید هویت"
@@ -478,7 +483,7 @@ class MainActivity : AppCompatActivity() {
     private fun navigateBackFromTopBar(pageTitle: String) {
         when (pageTitle) {
             "فرم بازرسی", "ثبت بازرسی" -> showHome("missions")
-            "بازبینی گزارش", "مرور گزارش" -> {
+            "بازبینی گزارش", "مرور گزارش", "نمای کلی شاخص‌ها" -> {
                 val mission = selectedMission
                 if (mission != null) showMission(mission, currentQuestionIndex) else showHome("missions")
             }
@@ -1481,6 +1486,7 @@ class MainActivity : AppCompatActivity() {
     private fun renderHome(tab: String) {
         selectedMission = null
         openDraft = null
+        checklistOverviewVisible = false
         activeTab = tab
         val profile = serverSnapshot.optJSONObject("profile")
         val profileName = profile?.optString("name", "بازرس") ?: "بازرس"
@@ -2673,6 +2679,7 @@ class MainActivity : AppCompatActivity() {
         }
         selectedMission = mission
         selectedMissionKey = key
+        checklistOverviewVisible = false
         val draft = if (openDraft?.key == key) openDraft!! else InspectionDraft(key, store)
         if (draft.integrityError) {
             openDraft = null
@@ -2693,37 +2700,17 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Build the page map from the authoritative snapshot. Question IDs and section IDs
-        // are never rewritten, so drafts, attachments, signatures and server scoring stay intact.
-        val sectionArray = snapshot.optJSONArray("sections") ?: JSONArray()
-        val pages = mutableListOf<ChecklistSectionPage>()
-        val assignedQuestionIndices = mutableSetOf<Int>()
-        if (sectionArray.length() == 0) {
-            // Backward compatibility for older snapshots that contain questions only.
-            pages.add(ChecklistSectionPage("__all__", "شاخص ارزیابی", "عمومی", (0 until count).toList()))
-        } else {
-            for (sectionIndex in 0 until sectionArray.length()) {
-                val section = sectionArray.optJSONObject(sectionIndex) ?: continue
-                val sectionId = section.optString("id").trim()
-                if (sectionId.isBlank()) continue
-                val indices = (0 until count).filter { qIndex ->
-                    questions.optJSONObject(qIndex)?.optString("sectionId") == sectionId
-                }
-                if (indices.isNotEmpty()) {
-                    pages.add(ChecklistSectionPage(
-                        sectionId,
-                        section.optString("title").ifBlank { section.optString("name").ifBlank { sectionId } },
-                        section.optString("category", "عمومی"),
-                        indices
-                    ))
-                    assignedQuestionIndices.addAll(indices)
-                }
-            }
-            val unassigned = (0 until count).filter { it !in assignedQuestionIndices }
-            if (unassigned.isNotEmpty()) {
-                pages.add(ChecklistSectionPage("__other__", "سایر موارد", "عمومی", unassigned))
-            }
-        }
+        // The same evaluator builds section navigation and the review/validation summaries.
+        // Server question IDs, section IDs and scoring rules remain unchanged.
+        val initialAssessment = draft.checklistOverview(mission)
+        val pages = initialAssessment.sections.map { section ->
+            ChecklistSectionPage(
+                section.section.id,
+                section.section.title,
+                section.section.category,
+                section.section.questionIndices
+            )
+        }.toMutableList()
         if (pages.isEmpty()) {
             pages.add(ChecklistSectionPage("__all__", "شاخص ارزیابی", "عمومی", (0 until count).toList()))
         }
@@ -2772,7 +2759,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val validAnswers = draft.answeredCount(mission)
+        val validAnswers = initialAssessment.answered
         val sectionAnswered = page.questionIndices.count { idx ->
             val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
             val value = ScoreInput.parse(draft.answers.optString(qid))
@@ -2804,6 +2791,11 @@ class MainActivity : AppCompatActivity() {
         ).apply { topMargin = dp(7); bottomMargin = dp(10) })
         val sectionLabel = text("این شاخص · $sectionAnswered از $pageQuestionCount آیتم پاسخ داده شده", 12, true, navy)
         progressInside.addView(sectionLabel)
+        val qualityLine = text(
+            "بدون امتیاز: ${initialAssessment.unscored}  •  نیازمند اصلاح: ${initialAssessment.attentionCount}",
+            11, true, if (initialAssessment.attentionCount > 0) Color.rgb(157, 99, 29) else muted
+        ).apply { setPadding(0, dp(8), 0, 0) }
+        progressInside.addView(qualityLine)
         val sectionProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = pageQuestionCount
             progress = sectionAnswered
@@ -2816,7 +2808,11 @@ class MainActivity : AppCompatActivity() {
         progressCard.addView(progressInside)
         content.addView(progressCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { bottomMargin = dp(13) })
+        ).apply { bottomMargin = dp(8) })
+        secondaryButton("نمای کلی شاخص‌ها و موارد ناقص · ${pages.size} شاخص") {
+            if (!saveDraftSafely(draft)) return@secondaryButton
+            showChecklistOverview(mission, draft, pages)
+        }
 
         val sectionHero = MaterialCardView(this).apply {
             radius = dp(20).toFloat()
@@ -2859,7 +2855,8 @@ class MainActivity : AppCompatActivity() {
         ).apply { bottomMargin = dp(15) })
 
         fun refreshProgress() {
-            val filledAll = draft.answeredCount(mission)
+            val latest = draft.checklistOverview(mission)
+            val filledAll = latest.answered
             val filledSection = page.questionIndices.count { idx ->
                 val qid = questions.optJSONObject(idx)?.optString("id").orEmpty()
                 val value = ScoreInput.parse(draft.answers.optString(qid))
@@ -2869,6 +2866,8 @@ class MainActivity : AppCompatActivity() {
             overallLabel.text = "پیشرفت کل مأموریت · $filledAll از $count بند"
             sectionProgress.progress = filledSection
             sectionLabel.text = "این شاخص · $filledSection از $pageQuestionCount آیتم پاسخ داده شده"
+            qualityLine.text = "بدون امتیاز: ${latest.unscored}  •  نیازمند اصلاح: ${latest.attentionCount}"
+            qualityLine.setTextColor(if (latest.attentionCount > 0 || latest.unscored > 0) Color.rgb(157, 99, 29) else muted)
         }
 
         fun addInput(
@@ -2953,19 +2952,41 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(9), 0, dp(9), 0)
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             val existingScore = draft.answers.optString(id)
-            val scoreValue = ScoreInput.parse(existingScore)
             val state = TextView(this).apply {
-                text = if (scoreValue != null && scoreValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
                 textSize = 10f
-                setTextColor(if (scoreValue != null && scoreValue in 0.0..100.0) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31))
                 setPadding(dp(8), dp(5), dp(8), dp(5))
-                background = rounded(if (scoreValue != null && scoreValue in 0.0..100.0) Color.rgb(229, 246, 237) else Color.rgb(250, 243, 226), 30)
             }
+            fun refreshQuestionState() {
+                val raw = draft.answers.optString(id)
+                val parsed = ScoreInput.parse(raw)
+                val noteMissing = parsed != null && parsed < 60.0 && draft.notes.optString(id).isBlank()
+                val evidenceMissing = parsed != null && (parsed < 30.0 || q.optBoolean("critical")) &&
+                    EvidenceRefs.references(draft.attachments, id).isEmpty()
+                val status = when {
+                    raw.isBlank() -> Triple("بدون امتیاز", Color.rgb(150, 96, 31), Color.rgb(250, 243, 226))
+                    parsed == null || parsed !in 0.0..100.0 -> Triple("امتیاز نامعتبر", Color.rgb(170, 52, 52), Color.rgb(252, 235, 235))
+                    noteMissing && evidenceMissing -> Triple("نیازمند توضیح و مستند", Color.rgb(150, 96, 31), Color.rgb(250, 243, 226))
+                    noteMissing -> Triple("نیازمند توضیح", Color.rgb(150, 96, 31), Color.rgb(250, 243, 226))
+                    evidenceMissing -> Triple("نیازمند مستند", Color.rgb(150, 96, 31), Color.rgb(250, 243, 226))
+                    else -> Triple("تکمیل‌شده", Color.rgb(25, 130, 82), Color.rgb(229, 246, 237))
+                }
+                state.text = status.first
+                state.setTextColor(status.second)
+                state.background = rounded(status.third, 30)
+            }
+            refreshQuestionState()
             questionHeader.addView(state)
             inside.addView(questionHeader)
             inside.addView(text(questionText, 15, true, navy).apply {
                 setPadding(0, dp(11), 0, dp(12))
             })
+            if (q.optBoolean("critical")) {
+                inside.addView(chip("شاخص بحرانی · ثبت مستند الزامی است", Color.rgb(252, 235, 235), Color.rgb(155, 48, 48)).apply {
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                })
+                inside.addView(View(this).apply { setBackgroundColor(Color.TRANSPARENT) },
+                    LinearLayout.LayoutParams(1, dp(6)))
+            }
             inside.addView(text("امتیاز ارزیابی · از ۰ تا ۱۰۰", 12, true, muted).apply {
                 setPadding(0, 0, 0, dp(5))
             })
@@ -2974,40 +2995,45 @@ class MainActivity : AppCompatActivity() {
                 draft.answers.put(id, normalizedScore)
                 draft.clearAcknowledgement()
                 saveDraftSafely(draft)
-                val numericValue = ScoreInput.parse(normalizedScore)
-                state.text = if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) "امتیاز ثبت شده" else "بدون امتیاز"
-                state.setTextColor(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31))
-                state.background = rounded(if (numericValue != null && numericValue.isFinite() && numericValue in 0.0..100.0) Color.rgb(229, 246, 237) else Color.rgb(250, 243, 226), 30)
+                refreshQuestionState()
                 refreshProgress()
             }
+            inside.addView(text("انتخاب سریع سطح ارزیابی", 11, true, muted).apply {
+                setPadding(0, dp(1), 0, dp(5))
+            })
             val quickScores = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutDirection = View.LAYOUT_DIRECTION_LTR
                 gravity = Gravity.CENTER
             }
-            listOf("0", "25", "50", "75", "100").forEach { value ->
+            AssessmentScale.quickLevels.forEach { option ->
                 val quick = TextView(this).apply {
-                    text = value
-                    textSize = 12f
+                    text = "${option.localizedValue}\n${option.label}"
+                    textSize = 9f
                     typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
                     setTextColor(navy)
                     gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    maxLines = 2
                     background = rounded(Color.rgb(239, 243, 248), 9)
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                    setPadding(dp(2), dp(5), dp(2), dp(5))
                     isClickable = true
                     isFocusable = true
-                    setOnClickListener { scoreInput.setText(value) }
+                    contentDescription = "${option.label}، امتیاز ${option.localizedValue}"
+                    setOnClickListener { scoreInput.setText(option.value) }
                 }
-                quickScores.addView(quick, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
-                    marginStart = dp(3); marginEnd = dp(3)
+                quickScores.addView(quick, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+                    marginStart = dp(2); marginEnd = dp(2)
                 })
             }
             inside.addView(quickScores, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(40)
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
             ).apply { bottomMargin = dp(10) })
-            addInput(inside, "توضیحات و دلایل ارزیابی (در صورت نیاز)", draft.notes.optString(id), false, true) { value ->
+            addInput(inside, "توضیحات و دلایل ارزیابی (برای امتیاز زیر ۶۰ الزامی)", draft.notes.optString(id), false, true) { value ->
                 draft.notes.put(id, value)
                 saveDraftSafely(draft)
+                refreshQuestionState()
+                refreshProgress()
             }
 
             val attached = EvidenceRefs.references(draft.attachments, id)
@@ -3129,6 +3155,109 @@ class MainActivity : AppCompatActivity() {
         shell.addView(footer, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
         ))
+    }
+
+    /** Full checklist map: jump to any section or directly to its first incomplete item. */
+    private fun showChecklistOverview(
+        mission: JSONObject,
+        draft: InspectionDraft,
+        pages: List<ChecklistSectionPage>
+    ) {
+        val overview = draft.checklistOverview(mission)
+        checklistOverviewVisible = true
+        screen("نمای کلی شاخص‌ها", mission.optString("orgName", "دستگاه اجرایی"))
+
+        val summaryCard = MaterialCardView(this).apply {
+            radius = dp(17).toFloat()
+            strokeWidth = dp(1)
+            strokeColor = line
+            cardElevation = 0f
+            setCardBackgroundColor(Color.WHITE)
+        }
+        val summaryBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(14), dp(15), dp(14))
+        }
+        summaryBody.addView(text("پیشرفت کل بازرسی", 16, true, navy))
+        summaryBody.addView(text("${overview.answered} از ${overview.total} بند دارای امتیاز معتبر", 12, false, muted).apply {
+            setPadding(0, dp(5), 0, dp(8))
+        })
+        val totalBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = overview.coveragePercent
+            progressTintList = ColorStateList.valueOf(gold)
+            progressBackgroundTintList = ColorStateList.valueOf(line)
+        }
+        summaryBody.addView(totalBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8)))
+        summaryBody.addView(text(
+            "بدون امتیاز: ${overview.unscored}  •  امتیاز نامعتبر: ${overview.invalidScores}  •  نیازمند توضیح: ${overview.missingNotes}  •  نیازمند مستند: ${overview.missingEvidence}",
+            11, true, if (overview.attentionCount > 0 || overview.unscored > 0) Color.rgb(150, 96, 31) else Color.rgb(25, 130, 82)
+        ).apply { setPadding(0, dp(10), 0, 0) })
+        summaryCard.addView(summaryBody)
+        content.addView(summaryCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(13)
+        })
+
+        pages.forEachIndexed { pageIndex, page ->
+            val section = overview.section(page.id)
+            val answered = section?.answered ?: 0
+            val total = section?.total ?: page.questionIndices.size
+            val unscored = section?.unscored ?: 0
+            val blockers = section?.attentionCount ?: 0
+            val firstIncomplete = section?.firstIncompleteIndex
+            val complete = section?.complete == true
+            val statusText = when {
+                (section?.structuralIssues ?: 0) > 0 || (section?.invalidScores ?: 0) > 0 -> "نیازمند بررسی امتیاز یا ساختار"
+                (section?.missingNotes ?: 0) > 0 || (section?.missingEvidence ?: 0) > 0 -> "نیازمند تکمیل توضیحات یا مستندات"
+                unscored > 0 -> "دارای بندهای بدون امتیاز"
+                complete -> "این شاخص تکمیل شده است"
+                else -> "در انتظار تکمیل"
+            }
+            val statusColor = if (complete) Color.rgb(25, 130, 82) else Color.rgb(150, 96, 31)
+            val panel = MaterialCardView(this).apply {
+                radius = dp(16).toFloat()
+                strokeWidth = dp(1)
+                strokeColor = line
+                cardElevation = 0f
+                setCardBackgroundColor(Color.WHITE)
+            }
+            val body = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                setPadding(dp(14), dp(13), dp(14), dp(13))
+            }
+            body.addView(text("شاخص ${pageIndex + 1} · ${page.title}", 15, true, navy))
+            body.addView(text("${page.category}  •  $answered از $total بند امتیاز معتبر", 11, false, muted).apply {
+                setPadding(0, dp(4), 0, dp(7))
+            })
+            val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = total.coerceAtLeast(1)
+                progress = answered.coerceAtMost(max)
+                progressTintList = ColorStateList.valueOf(if (complete) Color.rgb(35, 153, 103) else gold)
+                progressBackgroundTintList = ColorStateList.valueOf(line)
+            }
+            body.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)))
+            body.addView(text(statusText + if (blockers > 0) " · $blockers مورد نیازمند اصلاح" else "", 11, true, statusColor).apply {
+                setPadding(0, dp(7), 0, dp(8))
+            })
+            val targetIndex = firstIncomplete ?: page.questionIndices.firstOrNull() ?: 0
+            val actionCaption = if (firstIncomplete != null) "رفتن به اولین مورد ناقص" else "مشاهده این شاخص"
+            body.addView(makeButton(actionCaption, !complete) {
+                showMission(mission, targetIndex)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(45)))
+            panel.addView(body)
+            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(10)
+            })
+        }
+
+        val firstIncomplete = overview.firstIncompleteIndex
+        if (firstIncomplete != null) {
+            button("رفتن مستقیم به اولین بند ناقص") { showMission(mission, firstIncomplete) }
+        } else {
+            label("تمام بندهای دارای امتیاز، توضیحات و مستندات الزامی تکمیل شده‌اند.", 12, true, Color.rgb(25, 130, 82))
+        }
+        secondaryButton("بازگشت به فرم فعلی") { showMission(mission, currentQuestionIndex) }
     }
 
     /** A dedicated native review screen before the user intentionally queues a report. */

@@ -57,17 +57,22 @@ class InspectionDraft(val key: String, private val store: SecureStore) {
         }
     }
     fun clear() = store.clearDurable("draft:$key")
-    /** Shared count/omission rules, validated again independently by the PHP API. */
-    fun assessment(mission: JSONObject): AssessmentRules.Summary {
-        val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
-        val ids = (0 until questions.length()).mapNotNull { idx ->
-            questions.optJSONObject(idx)?.optString("id")?.trim()?.takeIf { it.isNotBlank() }
-        }
-        val scores = ids.associateWith { answers.optString(it) }
-        return AssessmentRules.evaluate(ids, scores)
+    /** One shared evaluation powers progress cards, section navigation and signature validation. */
+    fun checklistOverview(mission: JSONObject): ChecklistOverview {
+        val snapshot = mission.optJSONObject("checklistSnapshot") ?: JSONObject()
+        return ChecklistAssessment.fromSnapshot(snapshot, answers, notes, attachments)
     }
-    fun unscoredIds(mission: JSONObject): List<String> = assessment(mission).unscored
-    fun answeredCount(mission: JSONObject): Int = assessment(mission).answered
+
+    /** Backward-compatible summary shape used by existing screens. */
+    fun assessment(mission: JSONObject): AssessmentRules.Summary {
+        val overview = checklistOverview(mission)
+        val unscored = overview.questions.filter { it.unscored }.map { it.question.id }.filter { it.isNotBlank() }.distinct()
+        val invalid = overview.questions.filter { it.invalidScore }.map { it.question.id }.filter { it.isNotBlank() }.distinct()
+        return AssessmentRules.Summary(overview.total, overview.answered, unscored, invalid)
+    }
+    fun unscoredIds(mission: JSONObject): List<String> = checklistOverview(mission).questions
+        .filter { it.unscored }.map { it.question.id }.filter { it.isNotBlank() }.distinct()
+    fun answeredCount(mission: JSONObject): Int = checklistOverview(mission).answered
     fun acknowledgeUnscored(mission: JSONObject) {
         acknowledgedUnscored = JSONArray(unscoredIds(mission))
         acknowledgedAt = Instant.now().toString()
@@ -86,39 +91,7 @@ class InspectionDraft(val key: String, private val store: SecureStore) {
     fun acknowledgedIds(): JSONArray = JSONArray((0 until acknowledgedUnscored.length()).map { acknowledgedUnscored.optString(it) })
     fun validate(mission: JSONObject): List<String> {
         if (integrityError) return listOf("پیش‌نویس رمزنگاری‌شده قابل بازیابی نیست؛ برای جلوگیری از حذف اطلاعات، امکان ویرایش یا ارسال آن وجود ندارد")
-        val issues = mutableListOf<String>()
-        val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
-        if (questions.length() == 0) return listOf("چک‌لیست مأموریت خالی است")
-        val seenIds = mutableSetOf<String>()
-        for (i in 0 until questions.length()) {
-            val q = questions.optJSONObject(i)
-            if (q == null) {
-                issues.add("بند ${i + 1}: ساختار سؤال در اطلاعات سرور معتبر نیست")
-                continue
-            }
-            val id = q.optString("id").trim()
-            if (id.isBlank()) {
-                issues.add("بند ${i + 1}: شناسه سؤال از سرور دریافت نشده است")
-                continue
-            }
-            if (!seenIds.add(id)) {
-                issues.add("بند ${i + 1}: شناسه سؤال تکراری است")
-                continue
-            }
-            val raw = answers.optString(id)
-            // Empty score is allowed. It must be acknowledged before signing.
-            if (raw.isBlank()) continue
-            val number = ScoreInput.parse(raw)
-            if (number == null || number !in 0.0..100.0) {
-                issues.add("بند ${i + 1}: امتیاز باید عددی بین ۰ تا ۱۰۰ باشد")
-                continue
-            }
-            if (number < 60 && notes.optString(id).isBlank()) issues.add("بند ${i + 1}: برای امتیاز کمتر از ۶۰ توضیح لازم است")
-            if ((number < 30 || q.optBoolean("critical")) && EvidenceRefs.references(attachments, id).isEmpty()) {
-                issues.add("بند ${i + 1}: مستند برای پاسخ بحرانی لازم است")
-            }
-        }
-        return issues
+        return checklistOverview(mission).blockingIssues
     }
 
 }

@@ -66,6 +66,20 @@ for field_name in sorted(field_names):
             f"Duplicate parent attachment for field '{field_name}': field() already attaches its wrapper"
         )
 
+checklist_engine = MAIN / "java" / "ir" / "bazr" / "inspection" / "ChecklistAssessment.kt"
+if not checklist_engine.is_file():
+    errors.append("Missing 4.16 shared checklist assessment engine")
+else:
+    engine_text = checklist_engine.read_text(encoding="utf-8")
+    for required in ("fun fromSnapshot(", "fun evaluate(", "firstIncompleteIndex", "missingEvidence", "blockingIssues"):
+        if required not in engine_text:
+            errors.append(f"Checklist assessment engine is missing: {required}")
+if "private fun showChecklistOverview(" not in main_activity or "نمای کلی شاخص‌ها" not in main_activity:
+    errors.append("Missing native section overview and jump-to-incomplete screen")
+for required in ("نیازمند توضیح و مستند", "انتخاب سریع سطح ارزیابی", "رفتن به اولین مورد ناقص"):
+    if required not in main_activity:
+        errors.append(f"Missing 4.16 assessment UI element: {required}")
+
 diagnostics = MAIN / "java" / "ir" / "bazr" / "inspection" / "AppDiagnostics.kt"
 if not diagnostics.is_file():
     errors.append("Missing on-device diagnostics helper: AppDiagnostics.kt")
@@ -73,9 +87,9 @@ if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostic
     errors.append("Drafts screen must have a recoverable error boundary and diagnostic capture")
 
 
-# Version 4.15 UI and draft workflow regression guards.
-if 'versionName = "4.15.0"' not in gradle_file or 'versionCode = 29' not in gradle_file:
-    errors.append("Expected BAZR Android 4.15.0 / versionCode 29")
+# Version 4.15 draft workflow and 4.16 checklist assessment regression guards.
+if 'versionName = "4.16.0"' not in gradle_file or 'versionCode = 30' not in gradle_file:
+    errors.append("Expected BAZR Android 4.16.0 / versionCode 30")
 for required in (
     'var renderDraftCards: () -> Unit = {}',
     '"در حال تکمیل"',
@@ -91,6 +105,8 @@ for required in (
 if 'Color.WHITE' not in main_activity[main_activity.find('private fun bottomNavigation()'):main_activity.find('private fun statCard(')]:
     errors.append("Version 4.15 bottom navigation should use the approved light surface")
 inspection_draft = (MAIN / "java" / "ir" / "bazr" / "inspection" / "InspectionDraft.kt").read_text(encoding="utf-8")
+if "fun checklistOverview(mission: JSONObject): ChecklistOverview" not in inspection_draft:
+    errors.append("InspectionDraft must expose the shared checklist overview")
 if 'updatedAt = j.optString("updated_at", startedAt)' not in inspection_draft:
     errors.append("Draft timestamp migration must remain backward-compatible")
 if '.put("updated_at", updatedAt)' not in inspection_draft:
@@ -113,5 +129,6 @@ print(f" - Drawable references verified: {len(referenced)}")
 print(" - GitHub artifact version synchronized")
 print(" - Required login design assets present")
 print(" - 4.15 draft filters, progress and queue guards verified")
+print(" - 4.16 checklist engine, section overview and validation guards verified")
 print(" - Backward-compatible local draft timestamp verified")
 print(" - Duplicate TextInput parent attachment guard enabled")
