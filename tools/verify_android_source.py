@@ -45,6 +45,13 @@ elif version_match:
 else:
     errors.append("Could not read versionName from app/build.gradle.kts")
 
+# Regression guard: Kotlin Map.entries is a Set, so convert it to a List before takeLast().
+main_activity = (MAIN / "java" / "ir" / "bazr" / "inspection" / "MainActivity.kt").read_text(encoding="utf-8")
+if re.search(r"\.entries\s*\.takeLast\s*\(", main_activity):
+    errors.append("Invalid trend chart collection operation: convert Map.entries to List before takeLast()")
+if "entries.toList().takeLast(limit)" not in main_activity:
+    errors.append("Trend chart should select its tail from a List using entries.toList().takeLast(limit)")
+
 # Required visual assets used by the approved login/dashboard design.
 for name in ("login_building.webp", "iran_flag_ribbon.webp"):
     if not (MAIN / "res" / "drawable-nodpi" / name).is_file():

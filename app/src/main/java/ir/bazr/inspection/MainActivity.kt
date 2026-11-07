@@ -1962,7 +1962,7 @@ class MainActivity : AppCompatActivity() {
                 counts[key] = (counts[key] ?: 0) + 1
             }
             val limit = when (range) { "weekly" -> 7; "yearly" -> 5; else -> 6 }
-            return counts.toSortedMap().entries.takeLast(limit).map { entry ->
+            return counts.toSortedMap().entries.toList().takeLast(limit).map { entry ->
                 val label = when (range) {
                     "weekly" -> entry.key.takeLast(5)
                     "yearly" -> entry.key
