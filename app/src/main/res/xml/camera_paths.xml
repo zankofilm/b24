@@ -3,4 +3,5 @@
     <cache-path name="camera" path="camera/" />
     <cache-path name="supervisor_evidence" path="supervisor_evidence/" />
     <cache-path name="deficiency_evidence" path="deficiency_evidence/" />
+    <cache-path name="evidence_archive" path="evidence_archive/" />
 </paths>

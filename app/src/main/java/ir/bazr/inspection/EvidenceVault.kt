@@ -120,7 +120,7 @@ class EvidenceVault(private val context: Context, private val store: SecureStore
             }
             if (!temporary.renameTo(target)) throw IOException("ذخیره امن مستند ناموفق بود")
             store.saveDurable("evidence:$id", JSONObject().put("mime", actualMime).put("name", name)
-                .put("size", bytes.size).toString())
+                .put("size", bytes.size).put("created_at", System.currentTimeMillis()).toString())
             return "vault:$id"
         } catch (error: Exception) {
             temporary.delete()
@@ -160,6 +160,30 @@ class EvidenceVault(private val context: Context, private val store: SecureStore
             catch (_: Exception) { throw IOException("اعتبارسنجی رمزنگاری مستند ناموفق بود") }
         if (decoded.size > limitFor(mime) || sniffMime(decoded) != mime) throw IOException("محتوای مستند رمزنگاری‌شده معتبر نیست")
         return Evidence(decoded, mime, meta.optString("name", "evidence"))
+    }
+
+    /** Safe metadata-only lookup for the evidence archive; never decrypts the file body. */
+    fun metadataDetails(reference: String): JSONObject {
+        if (!reference.startsWith("vault:")) {
+            return JSONObject().put("name", "پیوست نسخه قدیمی")
+                .put("mime", "application/octet-stream").put("size", 0)
+                .put("created_at", 0).put("legacy", true)
+        }
+        val id = reference.removePrefix("vault:")
+        if (!idPattern.matches(id)) return JSONObject().put("integrity_error", true)
+        return try {
+            val raw = store.loadStrict("evidence:$id") ?: return JSONObject().put("integrity_error", true)
+            val meta = JSONObject(raw)
+            val file = File(folder, "$id.bin")
+            JSONObject()
+                .put("name", meta.optString("name", "مستند"))
+                .put("mime", meta.optString("mime", "application/octet-stream"))
+                .put("size", meta.optLong("size", 0L))
+                .put("created_at", meta.optLong("created_at", file.lastModified()))
+                .put("integrity_error", !file.isFile)
+        } catch (_: Exception) {
+            JSONObject().put("integrity_error", true)
+        }
     }
 
     fun metadata(reference: String): String {

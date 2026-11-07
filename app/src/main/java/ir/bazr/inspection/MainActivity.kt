@@ -85,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var signatures: SignedDraft
     private lateinit var deficiencies: DeficiencyStore
     private var selectedDeficiencyId: String? = null
+    private var pendingNoticeId: String? = null
     private var bulkPending: ArrayDeque<String>? = null
     private var bulkOk = 0
     private var bulkFailed = 0
@@ -156,8 +157,10 @@ class MainActivity : AppCompatActivity() {
     private val line = Color.rgb(216, 225, 235)
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         store.putString("notify_missions_enabled", if (granted) "yes" else "no")
-        notifyShort(if (granted) "اعلان مأموریت‌های تازه فعال شد" else "مجوز اعلان داده نشد")
-        showHome("account")
+        store.putString("notify_notices_enabled", if (granted) "yes" else "no")
+        if (granted) NoticePollingScheduler.schedule(this) else NoticePollingScheduler.cancel(this)
+        notifyShort(if (granted) "اعلان‌های سازمانی فعال شد" else "مجوز اعلان داده نشد")
+        showHome("notices")
     }
     private val evidencePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val question = store.load("pending_picker_question")
@@ -245,6 +248,18 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = SecureStore(this)
+        // Keep a separate encrypted device credential for notification-only polling.
+        // It is used only by mobile_notice_poll.php and is cleared on explicit logout.
+        if (store.load("notification_device_token") == null) {
+            runCatching { store.load("device_token") }.getOrNull()?.let {
+                runCatching { store.saveDurable("notification_device_token", it) }
+            }
+        }
+        if (store.getString("notify_notices_enabled") == null &&
+            store.getString("notify_missions_enabled") == "yes") {
+            store.putString("notify_notices_enabled", "yes")
+        }
+        if (store.getString("notify_notices_enabled") == "yes") NoticePollingScheduler.schedule(this)
         keys = DeviceKeys()
         api = ApiClient(BuildConfig.API_BASE_URL)
         evidenceVault = EvidenceVault(this, store)
@@ -266,7 +281,7 @@ class MainActivity : AppCompatActivity() {
                         val mission = selectedMission
                         if (mission != null) showMission(mission, currentQuestionIndex) else showHome("deficiencies")
                     }
-                    "deficiencies" -> showHome("home")
+                    "deficiencies", "notices", "evidence" -> showHome("home")
                     else -> if (checklistOverviewVisible && selectedMission != null) {
                         val mission = selectedMission!!
                         checklistOverviewVisible = false
@@ -281,16 +296,32 @@ class MainActivity : AppCompatActivity() {
         val cached = store.load("mobile_sync")
         if (cached != null) try { serverSnapshot = JSONObject(cached) } catch (_: Exception) { }
         showSplash {
+            pendingNoticeId = intent?.getStringExtra("notice_id")
             when {
                 store.biometricEnabled() -> showBiometricLock()
                 store.load("device_token") != null -> {
                     deviceToken = store.load("device_token")
-                    showHome()
+                    val requestedTab = if (intent?.getStringExtra("open_tab") == "notices") "notices" else "home"
+                    pendingNoticeId = intent?.getStringExtra("notice_id")
+                    showHome(requestedTab)
                     connectAndSync()
                 }
                 store.getString("request_id") != null -> showPending()
                 else -> showLogin()
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getStringExtra("open_tab") == "notices") {
+            pendingNoticeId = intent.getStringExtra("notice_id")
+            if (deviceToken != null) {
+                showHome("notices")
+                connectAndSync()
+            } else if (store.biometricEnabled()) showBiometricLock()
+            else notifyShort("برای مشاهده ابلاغیه‌ها ابتدا وارد حساب بازرس شوید")
         }
     }
 
@@ -438,7 +469,7 @@ class MainActivity : AppCompatActivity() {
         val backPages = setOf(
             "مأموریت‌های من", "فرم بازرسی", "ثبت بازرسی", "بازبینی گزارش", "مرور گزارش", "نمای کلی شاخص‌ها",
             "پیش‌نویس‌های من", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "سوابق بازرسی",
-            "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "ارسال گزارش‌ها", "کارتابل سربازرس",
+            "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "ارسال گزارش‌ها", "صندوق ابلاغیه‌ها", "کارتابل سربازرس",
             "بررسی گزارش بازرس", "تأیید دستگاه", "اطلاعیه‌های سازمانی", "تأیید هویت", "مدیریت نواقص",
             "جزئیات نقص", "ثبت نقص جدید"
         )
@@ -507,7 +538,7 @@ class MainActivity : AppCompatActivity() {
             "صف ارسال گزارش‌ها" -> showHome("drafts")
             "کارتابل سربازرس", "بررسی گزارش بازرس" -> showHome("supervisor")
             "تأیید دستگاه", "تأیید هویت" -> showLogin()
-            "اطلاعیه‌های سازمانی" -> showHome("account")
+            "اطلاعیه‌های سازمانی", "صندوق ابلاغیه‌ها" -> showHome("home")
             "مدیریت نواقص" -> showHome("home")
             "جزئیات نقص" -> showHome("deficiencies")
             "ثبت نقص جدید" -> {
@@ -519,10 +550,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAppMenu() {
-        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "نواقص و پیگیری اصلاحات", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
+        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "نواقص و پیگیری اصلاحات", "صندوق ابلاغیه‌ها", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
         val actions = mutableListOf<() -> Unit>(
             { showHome("home") }, { showHome("missions") }, { showHome("departments") },
-            { showHome("drafts") }, { showHome("deficiencies") }, { showHome("analytics") }, { showOfficialReports() }, { showHome("account") }
+            { showHome("drafts") }, { showHome("deficiencies") }, { showHome("notices") }, { showHome("analytics") }, { showOfficialReports() }, { showHome("account") }
         )
         if (serverSnapshot.optJSONObject("supervisor")?.optBoolean("can_review", false) == true) {
             labels.add(4, "کارتابل سربازرس")
@@ -734,13 +765,14 @@ class MainActivity : AppCompatActivity() {
             Triple("missions", "بازرسی", R.drawable.ic_clipboard),
             Triple("drafts", "پیش‌نویس‌ها", R.drawable.ic_notes),
             Triple("analytics", "گزارش‌ها", R.drawable.ic_chart),
+            Triple("notices", "ابلاغیه‌ها", R.drawable.ic_bell),
             Triple("account", "بیشتر", R.drawable.ic_person)
         )
         for ((id, caption, drawable) in items) {
             val chosen = activeTab == id ||
                 (id == "drafts" && activeTab == "outbox") ||
                 (id == "analytics" && activeTab in setOf("official_reports", "history")) ||
-                (id == "account" && activeTab in setOf("notices", "departments", "supervisor", "deficiencies"))
+                (id == "account" && activeTab in setOf("departments", "supervisor", "deficiencies", "evidence"))
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -761,6 +793,17 @@ class MainActivity : AppCompatActivity() {
                 background = if (chosen) rounded(navy, 11) else rounded(Color.TRANSPARENT, 11)
                 addView(icon(drawable, if (chosen) gold else navy, 22),
                     FrameLayout.LayoutParams(dp(25), dp(25), Gravity.CENTER))
+            }
+            if (id == "notices") {
+                val unread = noticeUnreadCount()
+                if (unread > 0) {
+                    val badge = text(if (unread > 99) "۹۹+" else faDigits(unread.toString()), 8, true, Color.WHITE).apply {
+                        gravity = Gravity.CENTER
+                        background = rounded(Color.rgb(184, 54, 48), 12)
+                        setPadding(dp(4), 0, dp(4), 0)
+                    }
+                    iconHolder.addView(badge, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(16), Gravity.TOP or Gravity.END))
+                }
             }
             item.addView(iconHolder, LinearLayout.LayoutParams(dp(43), dp(34)))
             val captionView = text(caption, 9, chosen, if (chosen) navy else muted)
@@ -1103,6 +1146,7 @@ class MainActivity : AppCompatActivity() {
                     // Status checks rotate the device token; discard any old biometric binding.
                     store.clearBio()
                     store.saveDurable("device_token", fresh)
+                    store.saveDurable("notification_device_token", fresh)
                     store.removeStringDurable("request_id")
                     deviceToken = fresh
                     notifyShort("دستگاه تأیید شد")
@@ -1113,6 +1157,10 @@ class MainActivity : AppCompatActivity() {
                     deviceToken = null
                     sessionToken = null
                     store.clearDurable("device_token")
+                    store.clearDurable("notification_device_token")
+                    store.clearDurable("pending_notice_reads")
+                    store.clearDurable("notice_notified_ids")
+                    NoticePollingScheduler.cancel(this)
                     store.clearBio()
                     store.removeStringDurable("request_id")
                     showLogin()
@@ -1134,8 +1182,29 @@ class MainActivity : AppCompatActivity() {
         work({
             val session = sessionFor(token)
             val syncedDeficiencies = syncPendingDeficiencies(session)
+            syncPendingNoticeReads(session)
             val payload = api.get("mobile_sync.php", session)
             payload.put("deficiency_sync_count", syncedDeficiencies)
+            val noticeInbox = try { api.get("mobile_notices.php", session) }
+                catch (error: ApiException) {
+                    if (error.status == 404) JSONObject().put("ok", true).put("notices", payload.optJSONArray("notices") ?: JSONArray())
+                    else throw error
+                }
+            val mergedNotices = linkedMapOf<String, JSONObject>()
+            for (source in listOf(payload.optJSONArray("notices") ?: JSONArray(),
+                noticeInbox.optJSONArray("notices") ?: JSONArray())) {
+                for (index in 0 until source.length()) {
+                    val item = source.optJSONObject(index) ?: continue
+                    val key = noticeKey(item)
+                    if (key.isNotBlank()) mergedNotices[key] = JSONObject(item.toString())
+                }
+            }
+            val normalizedNotices = JSONArray()
+            mergedNotices.values.forEach { normalizedNotices.put(it) }
+            payload.put("notices", normalizedNotices)
+            payload.put("notice_unread_count", (0 until normalizedNotices.length()).count {
+                normalizedNotices.optJSONObject(it)?.optBoolean("is_read") != true
+            })
             val supervisorInbox = try { api.get("mobile_supervisor_inbox.php", session) }
                 catch (error: ApiException) {
                     if (error.status in setOf(403, 404)) JSONObject().put("ok", true).put("can_review", false).put("items", JSONArray())
@@ -1162,7 +1231,8 @@ class MainActivity : AppCompatActivity() {
             serverSnapshot = payload
             store.save("mobile_sync", payload.toString())
             store.putString("last_sync", Instant.now().toString())
-            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor", "deficiencies") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
+            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor", "deficiencies", "notices", "evidence") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
+            NoticeNotificationDispatcher.dispatch(this, payload.optJSONArray("notices") ?: JSONArray(), store)
             if (newCount > 0) {
                 sendMissionNotification(newCount)
                 notifyShort("$newCount مأموریت جدید دریافت شد؛ از فهرست مأموریت‌ها مشاهده کنید")
@@ -1372,9 +1442,18 @@ class MainActivity : AppCompatActivity() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             store.putString("notify_missions_enabled", "yes")
-            notifyShort("اعلان مأموریت جدید هنگام همگام‌سازی فعال شد")
-            showHome("account")
+            store.putString("notify_notices_enabled", "yes")
+            NoticePollingScheduler.schedule(this)
+            notifyShort("اعلان‌های سازمانی و بررسی دوره‌ای ابلاغیه‌ها فعال شد")
+            showHome("notices")
         }
+    }
+
+    private fun disableNoticeNotifications() {
+        store.putString("notify_notices_enabled", "no")
+        NoticePollingScheduler.cancel(this)
+        notifyShort("اعلان‌های پس‌زمینه ابلاغیه غیرفعال شد؛ صندوق پیام همچنان در برنامه در دسترس است")
+        showHome("notices")
     }
 
     private fun online(): Boolean {
@@ -1402,9 +1481,20 @@ class MainActivity : AppCompatActivity() {
                         dialog.setOnDismissListener { preview.setImageDrawable(null); if (!bitmap.isRecycled) bitmap.recycle() }
                         dialog.show()
                     }
+            } else if (evidence.mime == "application/pdf") {
+                val dir = File(cacheDir, "evidence_archive").apply { mkdirs() }
+                val file = File(dir, "evidence-${UUID.randomUUID()}.pdf")
+                file.writeBytes(evidence.bytes)
+                val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/pdf")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                if (intent.resolveActivity(packageManager) != null) startActivity(intent)
+                else notifyShort("برای مشاهده PDF، یک نمایشگر PDF روی گوشی نصب کنید")
             } else {
-                AlertDialog.Builder(this).setTitle("مستند PDF")
-                    .setMessage("${evidenceVault.metadata(reference)}\n\nفایل به‌صورت رمزنگاری‌شده در خود برنامه نگهداری و هنگام ارسال بارگذاری می‌شود.")
+                AlertDialog.Builder(this).setTitle("مستند")
+                    .setMessage(evidenceVault.metadata(reference))
                     .setPositiveButton("تأیید",null).show()
             }
         } catch (e: Exception) {
@@ -1638,6 +1728,10 @@ class MainActivity : AppCompatActivity() {
                 val deficiencyCount = runCatching { deficiencies.entries().count { !it.optBoolean("integrity_error") } }.getOrDefault(0)
                 secondaryButton("مدیریت نواقص و پیگیری اصلاحات · ${faDigits(deficiencyCount.toString())}") {
                     showHome("deficiencies")
+                }
+                val localEvidenceCount = runCatching { EvidenceArchive(store, evidenceVault, deficiencies).localEntries(missions).size }.getOrDefault(0)
+                secondaryButton("مرکز مستندات و تصاویر · ${faDigits(localEvidenceCount.toString())}") {
+                    showHome("evidence")
                 }
                 sectionTitle("مأموریت‌های اخیر", "مشاهده همه") { showHome("missions") }
                 if (all.isEmpty()) {
@@ -2083,6 +2177,8 @@ class MainActivity : AppCompatActivity() {
                 label("ذخیره خودکار روی دستگاه فعال است. گزارش تا زمان دریافت رسید معتبر سرور، ارسال‌شده محسوب نمی‌شود.", 10, false, muted)
             }
             "deficiencies" -> showDeficiencies()
+            "notices" -> showNotices()
+            "evidence" -> showEvidenceLibrary()
             "account" -> {
                 screen("پروفایل و تنظیمات", "مدیریت حساب و امنیت دستگاه", withNav = true)
                 val profileCard = MaterialCardView(this).apply {
@@ -2132,7 +2228,7 @@ class MainActivity : AppCompatActivity() {
                     rowCard.addView(row)
                     content.addView(rowCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
                 }
-                settingRow("اعلان‌ها", "وضعیت اطلاع‌رسانی مأموریت‌ها", R.drawable.ic_notes) { showNotices() }
+                settingRow("اعلان‌ها و ابلاغیه‌ها", "صندوق پیام و دریافت اعلان در پس‌زمینه", R.drawable.ic_bell) { showHome("notices") }
                 settingRow("امنیت و ورود", if (store.biometricEnabled()) "ورود با اثر انگشت فعال است" else "مدیریت رمز و اثر انگشت", R.drawable.ic_lock) {
                     if (deviceToken != null && !store.biometricEnabled()) enableBiometric() else showBiometricLock()
                 }
@@ -2140,6 +2236,7 @@ class MainActivity : AppCompatActivity() {
                     if (deviceToken != null && !store.biometricEnabled()) enableBiometric() else showBiometricLock()
                 }
                 settingRow("سوابق و رسیدها", "مشاهده گزارش‌های ثبت‌شده", R.drawable.ic_chart) { showHistory() }
+                settingRow("مرکز مستندات و تصاویر", "آرشیو امن عکس‌ها و PDFهای بازرسی", R.drawable.ic_official_report) { showHome("evidence") }
                 settingRow("پشتیبانی و راهنما", "اطلاعات سامانه و راه‌های ارتباطی", R.drawable.ic_person) { showNotices() }
                 gap(6)
                 secondaryButton("خروج از حساب کاربری") { confirmLogout() }
@@ -4477,6 +4574,214 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun localEvidenceArchiveEntries(): List<EvidenceArchiveEntry> =
+        EvidenceArchive(store, evidenceVault, deficiencies).localEntries(serverSnapshot.optJSONArray("missions") ?: JSONArray())
+
+    private fun refreshEvidenceLibrary() {
+        val device = deviceToken ?: run { notifyShort("برای دریافت مستندات سرور ابتدا وارد حساب شوید"); return }
+        work({
+            val bearer = sessionFor(device)
+            Pair(bearer, api.getEvidenceLibrary(bearer))
+        }) { (bearer, response) ->
+            sessionToken = bearer
+            val items = response.optJSONArray("items") ?: JSONArray()
+            serverSnapshot.put("evidence_library", items)
+                .put("evidence_library_synced_at", response.optString("server_time"))
+            store.save("mobile_sync", serverSnapshot.toString())
+            showEvidenceLibrary()
+            notifyShort("${faDigits(items.length().toString())} مستند ارسال‌شده از سرور دریافت شد")
+        }
+    }
+
+    private fun evidenceDateLabel(epochMillis: Long, fallback: String = "") : String {
+        if (epochMillis > 0) return formatLocalTimestamp(Instant.ofEpochMilli(epochMillis).toString())
+        return fallback.ifBlank { "تاریخ نامشخص" }
+    }
+
+    private fun showEvidenceLibrary() {
+        selectedMission = null
+        openDraft = null
+        activeTab = "evidence"
+        screen("مرکز مستندات", "آرشیو امن تصاویر و مدارک بازرسی", withNav = true)
+
+        val localEntries = try { localEvidenceArchiveEntries() } catch (error: Exception) {
+            AppDiagnostics.record(this, "evidence_archive_local", error)
+            emptyList()
+        }
+        val remote = serverSnapshot.optJSONArray("evidence_library") ?: JSONArray()
+        val remoteEntries = (0 until remote.length()).mapNotNull { remote.optJSONObject(it) }
+        val localImages = localEntries.count { it.mime.startsWith("image/") }
+        val localDocuments = localEntries.size - localImages
+        val remoteImages = remoteEntries.count { it.optString("mime_type").startsWith("image/") }
+        val remoteDocuments = remoteEntries.size - remoteImages
+
+        val summary = MaterialCardView(this).apply {
+            radius = dp(17).toFloat(); strokeWidth = dp(1); strokeColor = gold
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+        }
+        val summaryBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(13), dp(14), dp(13))
+        }
+        summaryBody.addView(text("وضعیت آرشیو مستندات", 14, true, navy))
+        val metricRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        fun metric(value: Int, title: String, color: Int) {
+            val cell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(10), dp(4), dp(5)) }
+            cell.addView(text(faDigits(value.toString()), 22, true, color).apply { gravity = Gravity.CENTER })
+            cell.addView(text(title, 10, false, muted).apply { gravity = Gravity.CENTER })
+            metricRow.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        metric(localEntries.size, "روی گوشی", navy)
+        metric(remoteEntries.size, "ارسال‌شده", Color.rgb(35, 125, 80))
+        metric(localImages + remoteImages, "تصویر", Color.rgb(48, 112, 166))
+        metric(localDocuments + remoteDocuments, "PDF/سند", Color.rgb(156, 111, 39))
+        summaryBody.addView(metricRow)
+        summary.addView(summaryBody)
+        content.addView(summary)
+        gap(8)
+        val privacy = chip("مستندات محلی در گاوصندوق رمزنگاری‌شده نگهداری می‌شوند", Color.rgb(232, 242, 250), navy).apply {
+            gravity = Gravity.CENTER; textSize = 10f
+        }
+        content.addView(privacy)
+        gap(9)
+
+        val search = field("جست‌وجوی نام فایل، اداره یا شاخص")
+        search.setSingleLine(true)
+        search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
+        search.compoundDrawablePadding = dp(8)
+        val filters = listOf(
+            "all" to "همه",
+            EvidenceArchiveRules.IMAGES to "تصاویر",
+            EvidenceArchiveRules.DOCUMENTS to "PDF و اسناد",
+            EvidenceArchiveRules.LOCAL to "روی گوشی",
+            EvidenceArchiveRules.SERVER to "ارسال‌شده"
+        )
+        var selectedFilter = EvidenceArchiveRules.ALL
+        val filterScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        val filterButtons = linkedMapOf<String, MaterialButton>()
+        // Initialize before wiring filter callbacks to avoid local-function forward references.
+        var renderEvidenceRows: () -> Unit = {}
+        filters.forEach { (id, title) ->
+            val b = makeButton(title, false) { selectedFilter = id; renderEvidenceRows() }.apply {
+                textSize = 10f; minHeight = dp(40); setPadding(dp(9), 0, dp(9), 0)
+            }
+            filterButtons[id] = b
+            filterRow.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)).apply {
+                marginEnd = dp(5)
+            })
+        }
+        filterScroll.addView(filterRow)
+        content.addView(filterScroll)
+        gap(6)
+        val count = text("", 11, false, muted)
+        content.addView(count)
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(results)
+
+        fun buildRemoteRows(): List<Triple<Boolean, EvidenceArchiveEntry?, JSONObject?>> = remoteEntries.map { raw ->
+            Triple(false, null, raw)
+        }
+        renderEvidenceRows = {
+            val query = search.text?.toString()?.trim().orEmpty()
+            val rows = mutableListOf<Triple<Boolean, EvidenceArchiveEntry?, JSONObject?>>()
+            localEntries.forEach { rows.add(Triple(true, it, null)) }
+            rows.addAll(buildRemoteRows())
+            val filtered = rows.filter { (isLocal, local, server) ->
+                val mime = local?.mime ?: server?.optString("mime_type", "application/octet-stream").orEmpty()
+                val name = local?.name ?: server?.optString("original_name", "مستند").orEmpty()
+                val organization = local?.organization ?: server?.optString("organization", "").orEmpty()
+                val question = local?.questionTitle ?: server?.optString("question_title").orEmpty().ifBlank { server?.optString("question_key").orEmpty() }
+                val source = local?.sourceLabel ?: "ارسال‌شده به سرور"
+                EvidenceArchiveRules.matches(selectedFilter, isLocal, mime, query, listOf(name, organization, question, source))
+            }
+            count.text = "${faDigits(filtered.size.toString())} مستند نمایش داده می‌شود · ${faDigits(localEntries.size.toString())} محلی · ${faDigits(remoteEntries.size.toString())} سروری"
+            results.removeAllViews()
+            if (filtered.isEmpty()) {
+                val title = if (localEntries.isEmpty() && remoteEntries.isEmpty()) "هنوز مستندی در آرشیو نیست" else "مستندی با این فیلتر پیدا نشد"
+                val detail = if (deviceToken == null) "پس از ثبت مستند در فرم بازرسی، فایل در این بخش نمایش داده می‌شود." else "جست‌وجو یا فیلتر را تغییر دهید؛ برای دریافت فایل‌های ارسال‌شده، همگام‌سازی سرور را اجرا کنید."
+                val empty = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                    setPadding(dp(16), dp(26), dp(16), dp(26)); background = rounded(Color.WHITE, 14)
+                }
+                empty.addView(icon(R.drawable.ic_official_report, muted, 34))
+                empty.addView(text(title, 14, true, navy).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(4)) })
+                empty.addView(text(detail, 11, false, muted).apply { gravity = Gravity.CENTER })
+                results.addView(empty)
+            } else filtered.forEach { (isLocal, local, server) ->
+                val mime = local?.mime ?: server?.optString("mime_type", "application/octet-stream").orEmpty()
+                val name = local?.name ?: server?.optString("original_name", "مستند").orEmpty()
+                val organization = local?.organization ?: server?.optString("organization", "دستگاه اجرایی").orEmpty()
+                val question = local?.questionTitle ?: server?.optString("question_title").orEmpty().ifBlank { server?.optString("question_key").orEmpty().ifBlank { "شاخص" } }
+                val size = local?.sizeBytes ?: server?.optLong("file_size", 0L) ?: 0L
+                val date = local?.let { evidenceDateLabel(it.createdAtMillis) }
+                    ?: server?.optString("captured_at").orEmpty().ifBlank { "تاریخ ثبت‌شده در سرور" }
+                val source = local?.sourceLabel ?: "ارسال‌شده به سرور"
+                val panel = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line
+                    cardElevation = 0f; setCardBackgroundColor(Color.WHITE)
+                }
+                val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(11), dp(12), dp(11)) }
+                val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+                header.addView(iconBadge(if (mime.startsWith("image/")) R.drawable.ic_camera else R.drawable.ic_official_report, 22), LinearLayout.LayoutParams(dp(42), dp(42)))
+                val titleBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(9), 0, 0, 0) }
+                titleBox.addView(text(name, 12, true, navy).apply { maxLines = 2 })
+                titleBox.addView(text(organization, 10, false, muted).apply { maxLines = 1 })
+                header.addView(titleBox, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                val stateChip = chip(if (isLocal) "روی گوشی" else "ارسال‌شده", if (isLocal) Color.rgb(235, 240, 248) else Color.rgb(230, 246, 237), if (isLocal) navy else Color.rgb(35, 125, 80)).apply { textSize = 9f }
+                header.addView(stateChip)
+                body.addView(header)
+                body.addView(text("شاخص: $question", 10, false, ink).apply { setPadding(0, dp(7), 0, dp(2)); maxLines = 2 })
+                body.addView(text("$source · ${EvidenceArchiveRules.formatSize(size)} · $date", 9, false, muted).apply { setPadding(0, dp(2), 0, dp(7)); maxLines = 2 })
+                val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+                val viewButton = makeButton("مشاهده مستند", true) {
+                    if (isLocal && local != null) {
+                        if (local.integrityError) notifyShort("اطلاعات رمزنگاری‌شده این مستند قابل بازیابی نیست؛ فایل حذف نشده است")
+                        else openAttachedEvidence(local.reference)
+                    } else {
+                        val id = server?.optInt("id", 0) ?: 0
+                        if (id > 0) openRemoteDeficiencyEvidence(id) else notifyShort("شناسه فایل سرور معتبر نیست")
+                    }
+                }.apply { textSize = 10f; minHeight = dp(42) }
+                actions.addView(viewButton, LinearLayout.LayoutParams(0, dp(43), 1f))
+                val entryMissionKey = local?.missionKey ?: server?.optString("mission_key").orEmpty()
+                if (entryMissionKey.isNotBlank()) {
+                    val mission = (0 until (serverSnapshot.optJSONArray("missions")?.length() ?: 0))
+                        .mapNotNull { serverSnapshot.optJSONArray("missions")?.optJSONObject(it) }
+                        .firstOrNull { missionKey(it) == entryMissionKey }
+                    if (mission != null && local?.questionId?.isNotBlank() == true) {
+                        val questionId = local.questionId
+                        val jump = makeButton("بازکردن شاخص", false) {
+                            val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
+                            var index = 0
+                            for (i in 0 until questions.length()) if (questions.optJSONObject(i)?.optString("id") == questionId) { index = i; break }
+                            showMission(mission, index)
+                        }.apply { textSize = 10f; minHeight = dp(42) }
+                        actions.addView(jump, LinearLayout.LayoutParams(0, dp(43), 1f).apply { marginStart = dp(6) })
+                    }
+                }
+                body.addView(actions)
+                panel.addView(body)
+                results.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+            }
+            filterButtons.forEach { (id, button) ->
+                val selected = id == selectedFilter
+                button.backgroundTintList = ColorStateList.valueOf(if (selected) navy else Color.WHITE)
+                button.setTextColor(if (selected) Color.WHITE else muted)
+                button.strokeColor = ColorStateList.valueOf(if (selected) gold else line)
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderEvidenceRows() }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        renderEvidenceRows()
+        gap(8)
+        secondaryButton("همگام‌سازی مستندات ارسال‌شده") { refreshEvidenceLibrary() }
+        secondaryButton("بازگشت به فرم‌های بازرسی") { showHome("missions") }
+        label("حذف مستند از این آرشیو انجام نمی‌شود تا از حذف ناخواسته شواهد جلوگیری شود. مدیریت حذف فقط از محل ثبت اصلی و با تأیید کاربر انجام می‌شود.", 10, false, muted)
+    }
+
     private fun showOfficialReports() {
         val device = deviceToken ?: run { notifyShort("برای مشاهده گزارش رسمی ابتدا وارد حساب شوید"); return }
         activeTab = "official_reports"
@@ -4686,29 +4991,301 @@ class MainActivity : AppCompatActivity() {
         secondaryButton("بازگشت به سوابق") { showHistory() }
     }
 
+    private fun noticeUnreadCount(): Int {
+        val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
+        return (0 until notices.length()).count { index ->
+            val item = notices.optJSONObject(index) ?: return@count false
+            !item.optBoolean("is_read", item.optBoolean("read", false))
+        }
+    }
+
+    private fun noticeKey(notice: JSONObject): String =
+        notice.optString("notice_key").ifBlank {
+            notice.optString("_server_key").ifBlank { notice.optString("id") }
+        }
+
+    private fun setNoticeReadLocally(key: String) {
+        if (key.isBlank()) return
+        val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
+        for (i in 0 until notices.length()) {
+            val item = notices.optJSONObject(i) ?: continue
+            if (noticeKey(item) == key || item.optString("id") == key) {
+                item.put("is_read", true)
+                    .put("read_at", Instant.now().toString())
+            }
+        }
+        serverSnapshot.put("notices", notices)
+        serverSnapshot.put("notice_unread_count", noticeUnreadCount())
+        runCatching { store.saveDurable("mobile_sync", serverSnapshot.toString()) }
+    }
+
+    private fun queueNoticeRead(key: String) {
+        if (key.isBlank()) return
+        val saved = runCatching { store.loadStrict("pending_notice_reads") }.getOrNull()
+        val ids = linkedSetOf<String>()
+        runCatching { JSONArray(saved ?: "[]") }.getOrNull()?.let { array ->
+            for (i in 0 until array.length()) array.optString(i).takeIf { it.isNotBlank() }?.let(ids::add)
+        }
+        ids.add(key)
+        runCatching { store.saveDurable("pending_notice_reads", JSONArray(ids.toList().takeLast(400)).toString()) }
+    }
+
+    private fun removeQueuedNoticeRead(key: String) {
+        val raw = runCatching { store.loadStrict("pending_notice_reads") }.getOrNull() ?: return
+        val pending = runCatching { JSONArray(raw) }.getOrNull() ?: return
+        val remaining = (0 until pending.length()).map { pending.optString(it) }
+            .filter { it.isNotBlank() && it != key }
+        runCatching { store.saveDurable("pending_notice_reads", JSONArray(remaining).toString()) }
+    }
+
+    private fun syncPendingNoticeReads(session: String): Int {
+        val raw = runCatching { store.loadStrict("pending_notice_reads") }.getOrNull() ?: return 0
+        val pending = runCatching { JSONArray(raw) }.getOrElse { return 0 }
+        val remaining = mutableListOf<String>()
+        var synced = 0
+        for (i in 0 until pending.length()) {
+            val key = pending.optString(i).takeIf { it.isNotBlank() } ?: continue
+            try {
+                api.post("mobile_notice_read.php",
+                    JSONObject().put("action", "mark_read").put("notice_key", key), session)
+                synced++
+            } catch (_: Exception) {
+                remaining.add(key)
+            }
+        }
+        runCatching { store.saveDurable("pending_notice_reads", JSONArray(remaining).toString()) }
+        return synced
+    }
+
+    private fun markNoticeRead(key: String, after: () -> Unit) {
+        if (key.isBlank()) { after(); return }
+        val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
+        val alreadyRead = (0 until notices.length()).mapNotNull { notices.optJSONObject(it) }
+            .firstOrNull { noticeKey(it) == key || it.optString("id") == key }
+            ?.optBoolean("is_read", false) == true
+        if (alreadyRead) { after(); return }
+
+        // Optimistic local receipt is durable; server receipt is retried if offline or busy.
+        queueNoticeRead(key)
+        setNoticeReadLocally(key)
+        after()
+
+        val device = deviceToken
+        if (device == null || !online() || busy) {
+            if (!online()) notifyShort("ابلاغیه خوانده شد؛ رسید آن پس از اتصال همگام می‌شود")
+            return
+        }
+        io.execute {
+            if (deviceToken != device) return@execute
+            try {
+                val bearer = sessionToken ?: sessionFor(device)
+                api.post("mobile_notice_read.php",
+                    JSONObject().put("action", "mark_read").put("notice_key", key), bearer)
+                removeQueuedNoticeRead(key)
+            } catch (_: Exception) {
+                // Keep the encrypted local queue entry; connectAndSync retries it later.
+            }
+        }
+    }
+
+    private fun markAllNoticesRead() {
+        val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
+        val keys = (0 until notices.length()).mapNotNull { notices.optJSONObject(it) }
+            .filter { !it.optBoolean("is_read", it.optBoolean("read", false)) }
+            .map(::noticeKey).filter { it.isNotBlank() }
+        if (keys.isEmpty()) { notifyShort("همه ابلاغیه‌ها قبلاً خوانده شده‌اند"); return }
+        val device = deviceToken
+        if (device == null || !online() || busy) {
+            keys.forEach(::queueNoticeRead)
+            keys.forEach(::setNoticeReadLocally)
+            showHome("notices")
+            notifyShort("وضعیت خواندن پس از اتصال به سرور همگام می‌شود")
+            return
+        }
+        work({
+            val bearer = sessionToken ?: sessionFor(device)
+            api.post("mobile_notice_read.php", JSONObject().put("action", "read_all"), bearer)
+        }) {
+            keys.forEach(::setNoticeReadLocally)
+            showHome("notices")
+            notifyShort("همه ابلاغیه‌ها خوانده‌شده ثبت شدند")
+        }
+    }
+
+    private fun openNoticeTarget(notice: JSONObject) {
+        val refType = notice.optString("ref_type", notice.optString("refType"))
+        val refId = notice.optString("ref_id", notice.optString("refId"))
+        val targetMissionKey = notice.optString("mission_key", notice.optString("missionKey"))
+        when (refType) {
+            "mission" -> {
+                val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+                val mission = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }
+                    .firstOrNull { missionKey(it) == targetMissionKey || missionKey(it) == refId || it.optString("id") == refId }
+                if (mission != null) showMission(mission) else {
+                    showHome("missions")
+                    notifyShort("مأموریت مرتبط در آخرین همگام‌سازی موجود نیست")
+                }
+            }
+            "deficiency", "corrective_action" -> {
+                val record = runCatching { deficiencies.get(refId) }.getOrNull()
+                    ?: deficiencies.entries().firstOrNull {
+                        it.optString("server_id") == refId || it.optString("id") == refId
+                    }
+                if (record != null) showDeficiencyDetail(record) else {
+                    showHome("deficiencies")
+                    notifyShort("نقص مرتبط در حافظه فعلی پیدا نشد")
+                }
+            }
+            "report" -> showHistory()
+            else -> notifyShort("این ابلاغیه پیوند مستقیمی به یک صفحه عملیاتی ندارد")
+        }
+    }
+
+    private fun showNoticeDetail(notice: JSONObject) {
+        val title = notice.optString("title", "ابلاغیه سازمانی")
+        val body = notice.optString("message", notice.optString("body", ""))
+        val severity = when (notice.optString("severity")) {
+            "critical" -> "فوری"
+            "important" -> "مهم"
+            else -> "عادی"
+        }
+        val sender = notice.optString("sender_name", "مدیریت سامانه")
+        val created = notice.optString("created_at", notice.optString("date"))
+        val refType = notice.optString("ref_type", notice.optString("refType"))
+        val builder = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage("$body\n\nاولویت: $severity\nفرستنده: $sender" +
+                if (created.isNotBlank()) "\nزمان: $created" else "")
+            .setPositiveButton(if (refType.isNotBlank()) "بازکردن مورد مرتبط" else "بستن") { _, _ ->
+                if (refType.isNotBlank()) openNoticeTarget(notice)
+            }
+        if (refType.isNotBlank()) builder.setNegativeButton("بستن", null)
+        builder.show()
+    }
+
     private fun showNotices() {
         selectedMission = null
         openDraft = null
         activeTab = "notices"
-        screen("اطلاعیه‌های سازمانی", "پیام‌های مجاز دریافت‌شده از سرور")
+        screen("صندوق ابلاغیه‌ها", "پیام‌ها و ابلاغیه‌های اختصاصی سازمان", withNav = true)
+
         val notices = serverSnapshot.optJSONArray("notices") ?: JSONArray()
-        if (notices.length() == 0) emptyState("اطلاعیه‌ای موجود نیست", "برای دریافت اطلاعیه‌ها، اطلاعات برنامه را همگام‌سازی کنید.")
-        for (i in 0 until notices.length()) {
-            val notice = notices.optJSONObject(i) ?: continue
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(Color.WHITE, 14)
-                setPadding(dp(16), dp(16), dp(16), dp(16))
-            }
-            card.addView(text(notice.optString("title", "اطلاعیه سازمانی"), 16, true, navy))
-            val body = listOf("message", "body", "text", "description")
-                .map { notice.optString(it) }.firstOrNull { it.isNotBlank() }.orEmpty()
-            if (body.isNotBlank()) card.addView(text(body.take(1200), 13, false, ink))
-            notice.optString("date").takeIf { it.isNotBlank() }?.let { card.addView(text(it, 11, false, muted)) }
-            content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+        val unread = noticeUnreadCount()
+        val urgent = (0 until notices.length()).count {
+            notices.optJSONObject(it)?.let { n ->
+                !n.optBoolean("is_read") && n.optString("severity") == "critical"
+            } == true
         }
-        secondaryButton("بازگشت به خانه") { showHome() }
+        val summary = MaterialCardView(this).apply {
+            radius = dp(16).toFloat(); strokeWidth = dp(1); strokeColor = gold
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+        }
+        val summaryBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(13), dp(14), dp(13))
+        }
+        summaryBody.addView(text("وضعیت ابلاغیه‌های شما", 14, true, navy))
+        val metrics = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        fun noticeMetric(value: Int, title: String, color: Int) {
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                background = rounded(Color.rgb(244, 247, 250), 11)
+                setPadding(dp(5), dp(8), dp(5), dp(8))
+            }
+            cell.addView(text(faDigits(value.toString()), 20, true, color).apply { gravity = Gravity.CENTER })
+            cell.addView(text(title, 9, true, muted).apply { gravity = Gravity.CENTER })
+            metrics.addView(cell, LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                marginStart = dp(4); marginEnd = dp(4)
+            })
+        }
+        noticeMetric(notices.length(), "کل ابلاغیه‌ها", navy)
+        noticeMetric(unread, "خوانده‌نشده", Color.rgb(163, 112, 42))
+        noticeMetric(urgent, "فوری", Color.rgb(164, 61, 49))
+        summaryBody.addView(metrics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(10)
+        })
+        summary.addView(summaryBody)
+        content.addView(summary)
+        gap(10)
+
+        goldButton("همگام‌سازی ابلاغیه‌ها") {
+            if (deviceToken == null) notifyShort("برای دریافت ابلاغیه‌ها ابتدا وارد حساب بازرس شوید")
+            else connectAndSync()
+        }
+        if (store.getString("notify_notices_enabled") != "yes") {
+            secondaryButton("فعال‌سازی اعلان‌های پس‌زمینه") { enableMissionNotifications() }
+        } else {
+            secondaryButton("مدیریت مجوز اعلان‌ها") { enableMissionNotifications() }
+            secondaryButton("غیرفعال‌سازی اعلان‌های پس‌زمینه") { disableNoticeNotifications() }
+        }
+        if (unread > 0) secondaryButton("علامت‌گذاری همه به‌عنوان خوانده‌شده") { markAllNoticesRead() }
+        gap(8)
+
+        if (notices.length() == 0) {
+            emptyState("ابلاغیه‌ای موجود نیست", "با همگام‌سازی، پیام‌های اختصاصی بازرس و ابلاغیه‌های سازمانی در این بخش نمایش داده می‌شوند.")
+        } else {
+            for (i in 0 until notices.length()) {
+                val notice = notices.optJSONObject(i) ?: continue
+                val isRead = notice.optBoolean("is_read", notice.optBoolean("read", false))
+                val severity = notice.optString("severity", "info")
+                val severityLabel = when (severity) {
+                    "critical" -> "فوری"
+                    "important" -> "مهم"
+                    else -> "عادی"
+                }
+                val severityColor = when (severity) {
+                    "critical" -> Color.rgb(164, 61, 49)
+                    "important" -> Color.rgb(153, 103, 35)
+                    else -> Color.rgb(49, 103, 145)
+                }
+                val card = MaterialCardView(this).apply {
+                    radius = dp(15).toFloat()
+                    strokeWidth = dp(if (isRead) 1 else 2)
+                    strokeColor = if (isRead) line else gold
+                    cardElevation = if (isRead) 0f else dp(2).toFloat()
+                    setCardBackgroundColor(Color.WHITE)
+                    isClickable = true; isFocusable = true
+                }
+                val body = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(13), dp(14), dp(13))
+                }
+                val header = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                header.addView(chip(severityLabel, Color.rgb(250, 243, 230), severityColor))
+                header.addView(text(if (isRead) "خوانده‌شده" else "جدید", 10, true,
+                    if (isRead) muted else Color.rgb(155, 105, 32)).apply {
+                    gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), 0, dp(8), 0)
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                body.addView(header)
+                body.addView(text(notice.optString("title", "ابلاغیه سازمانی"), 14, true, navy).apply {
+                    setPadding(0, dp(9), 0, dp(5))
+                })
+                val message = notice.optString("message", notice.optString("body", ""))
+                if (message.isNotBlank()) body.addView(text(message.take(900), 11, false, ink).apply { maxLines = 4 })
+                val created = notice.optString("created_at", notice.optString("date"))
+                if (created.isNotBlank()) body.addView(text(created, 9, false, muted).apply { setPadding(0, dp(7), 0, 0) })
+                card.addView(body)
+                card.setOnClickListener {
+                    val key = noticeKey(notice)
+                    markNoticeRead(key) { showHome("notices"); showNoticeDetail(notice) }
+                }
+                content.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) })
+            }
+        }
+        val pendingId = pendingNoticeId
+        if (!pendingId.isNullOrBlank()) {
+            val target = (0 until notices.length()).mapNotNull { notices.optJSONObject(it) }
+                .firstOrNull { noticeKey(it) == pendingId || it.optString("id") == pendingId }
+            if (target != null) {
+                pendingNoticeId = null
+                markNoticeRead(noticeKey(target)) { showHome("notices"); showNoticeDetail(target) }
+            }
+        }
     }
 
     private fun biometricsAvailable(): Boolean = BiometricManager.from(this)
@@ -4771,7 +5348,13 @@ class MainActivity : AppCompatActivity() {
             try {
                 val cipher = store.bioDecryptCipher() ?: error("token missing")
                 biometricPrompt("ورود با اثر انگشت", cipher) { authorized ->
-                    try { deviceToken = store.decryptBio(authorized); showHome(); connectAndSync() }
+                    try {
+                        deviceToken = store.decryptBio(authorized)
+                        store.saveDurable("notification_device_token", deviceToken!!)
+                        val requestedTab = if (intent?.getStringExtra("open_tab") == "notices") "notices" else "home"
+                        showHome(requestedTab)
+                        connectAndSync()
+                    }
                     catch (_: Exception) { notifyShort("کلید دستگاه نامعتبر است؛ ورود مجدد لازم است"); showLogin() }
                 }
             } catch (_: Exception) { notifyShort("اطلاعات بیومتریک نیازمند فعال‌سازی مجدد است"); showLogin() }
@@ -4784,7 +5367,10 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("انصراف",null)
             .setPositiveButton("خروج") { _,_ ->
                 deviceToken=null;sessionToken=null
-                store.clearDurable("device_token");store.clearBio()
+                store.clearDurable("device_token");store.clearDurable("notification_device_token");store.clearBio()
+                store.clearDurable("pending_notice_reads");store.clearDurable("notice_notified_ids")
+                NoticePollingScheduler.cancel(this)
+                store.putString("notify_notices_enabled", "no")
                 store.removeStringDurable("request_id")
                 store.clearDurable("mobile_sync")
                 store.removeStringDurable("last_sync")

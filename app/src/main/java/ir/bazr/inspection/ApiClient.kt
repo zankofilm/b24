@@ -51,6 +51,9 @@ class ApiClient(private val base: String) {
 
     fun get(path: String, bearer: String): JSONObject = read(open(path, "GET", bearer))
 
+    /** Authenticated list of this inspector's uploaded evidence, restricted to assigned missions. */
+    fun getEvidenceLibrary(bearer: String): JSONObject = get("mobile_evidence_library.php", bearer)
+
     /** Secure evidence download for the assigned mobile supervisor review inbox. */
     fun downloadSupervisorEvidence(uploadId: Int, bearer: String): Pair<ByteArray, String> {
         require(uploadId > 0)
