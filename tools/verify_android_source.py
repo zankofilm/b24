@@ -151,8 +151,8 @@ if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostic
 
 
 # Version 4.15 draft workflow and 4.16 checklist assessment regression guards.
-if 'versionName = "4.19.0"' not in gradle_file or 'versionCode = 33' not in gradle_file:
-    errors.append("Expected BAZR Android 4.19.0 / versionCode 33")
+if 'versionName = "4.20.0"' not in gradle_file or 'versionCode = 34' not in gradle_file:
+    errors.append("Expected BAZR Android 4.20.0 / versionCode 34")
 for required in (
     'var renderDraftCards: () -> Unit = {}',
     '"در حال تکمیل"',
@@ -211,6 +211,31 @@ if "downloadInspectorEvidence(uploadId, bearer)" not in main_activity:
 if "refreshEvidenceLibrary()" not in main_activity or "api.getEvidenceLibrary(bearer)" not in main_activity:
     errors.append("Evidence archive must support authenticated server refresh")
 
+# Version 4.20 Jalali mission calendar, schedule navigation and local reminders.
+mission_rules = MAIN / "java" / "ir" / "bazr" / "inspection" / "MissionScheduleRules.kt"
+reminder_worker = MAIN / "java" / "ir" / "bazr" / "inspection" / "MissionReminderWorker.kt"
+reminder_scheduler = MAIN / "java" / "ir" / "bazr" / "inspection" / "MissionReminderScheduler.kt"
+for path in (mission_rules, reminder_worker, reminder_scheduler):
+    if not path.is_file():
+        errors.append(f"Missing 4.20 mission scheduling component: {path.name}")
+if mission_rules.is_file():
+    rules_text = mission_rules.read_text(encoding="utf-8")
+    for required in ("fun parseDate(", "fun parseTime(", "fun missionDate(", "fun scheduledInstant(", "fun weekDates(", "fun coordinates("):
+        if required not in rules_text:
+            errors.append(f"Mission schedule rules missing: {required}")
+if "private fun showMissionCalendar()" not in main_activity or '"calendar" -> showMissionCalendar()' not in main_activity:
+    errors.append("Missing native Jalali mission calendar screen and route")
+for required in ("تقویم و برنامه مأموریت‌ها", "نمایش تقویم مأموریت‌ها", "تنظیم یادآوری یک ساعت قبل از بازدید", "مسیریابی تا محل مأموریت", "MissionReminderScheduler.schedule(this"):
+    if required not in main_activity:
+        errors.append(f"Missing 4.20 mission calendar UI/action: {required}")
+if "fun toGregorian(" not in (MAIN / "java" / "ir" / "bazr" / "inspection" / "PersianCalendar.kt").read_text(encoding="utf-8"):
+    errors.append("Persian calendar must support Jalali-to-Gregorian conversion")
+mission_test = ROOT / "app" / "src" / "test" / "java" / "ir" / "bazr" / "inspection" / "MissionScheduleRulesTest.kt"
+if not mission_test.is_file():
+    errors.append("Missing mission calendar/date parsing unit tests")
+if "bazr-inspector-4.20.0-apk" not in (ROOT / ".github" / "workflows" / "android.yml").read_text(encoding="utf-8"):
+    errors.append("GitHub Actions artifact name must match version 4.20.0")
+
 if errors:
     print("BAZR source verification FAILED")
     for error in errors:
@@ -227,6 +252,7 @@ print(" - 4.16 checklist engine, section overview and validation guards verified
 print(" - 4.17 encrypted deficiency tracking, audit history and ownership checks verified")
 print(" - 4.18 targeted notice inbox, read receipts and background polling guards verified")
 print(" - 4.19 encrypted evidence archive, secure PDF preview and assigned-file API guards verified")
+print(" - 4.20 Jalali mission calendar, date parsing, map deep-link and one-hour reminder guards verified")
 print(" - Offline status changes are blocked until the finding has a server receipt")
 print(" - Backward-compatible local draft timestamp verified")
 print(" - Duplicate TextInput parent attachment guard enabled")

@@ -86,6 +86,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var deficiencies: DeficiencyStore
     private var selectedDeficiencyId: String? = null
     private var pendingNoticeId: String? = null
+    private var pendingCalendarMissionKey: String? = null
+    private var pendingMissionReminder: JSONObject? = null
     private var bulkPending: ArrayDeque<String>? = null
     private var bulkOk = 0
     private var bulkFailed = 0
@@ -156,11 +158,21 @@ class MainActivity : AppCompatActivity() {
     private val pageBg = Color.rgb(243, 246, 250)
     private val line = Color.rgb(216, 225, 235)
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        store.putString("notify_missions_enabled", if (granted) "yes" else "no")
-        store.putString("notify_notices_enabled", if (granted) "yes" else "no")
-        if (granted) NoticePollingScheduler.schedule(this) else NoticePollingScheduler.cancel(this)
-        notifyShort(if (granted) "اعلان‌های سازمانی فعال شد" else "مجوز اعلان داده نشد")
-        showHome("notices")
+        val reminderMission = pendingMissionReminder
+        pendingMissionReminder = null
+        if (reminderMission != null) {
+            if (granted) {
+                store.putString("notify_missions_enabled", "yes")
+                scheduleMissionReminder(reminderMission)
+            }
+            showMission(reminderMission)
+        } else {
+            store.putString("notify_missions_enabled", if (granted) "yes" else "no")
+            store.putString("notify_notices_enabled", if (granted) "yes" else "no")
+            if (granted) NoticePollingScheduler.schedule(this) else NoticePollingScheduler.cancel(this)
+            notifyShort(if (granted) "اعلان‌های سازمانی فعال شد" else "مجوز اعلان داده نشد")
+            showHome("notices")
+        }
     }
     private val evidencePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val question = store.load("pending_picker_question")
@@ -282,6 +294,7 @@ class MainActivity : AppCompatActivity() {
                         if (mission != null) showMission(mission, currentQuestionIndex) else showHome("deficiencies")
                     }
                     "deficiencies", "notices", "evidence" -> showHome("home")
+                    "calendar" -> showHome("missions")
                     else -> if (checklistOverviewVisible && selectedMission != null) {
                         val mission = selectedMission!!
                         checklistOverviewVisible = false
@@ -295,13 +308,14 @@ class MainActivity : AppCompatActivity() {
         })
         val cached = store.load("mobile_sync")
         if (cached != null) try { serverSnapshot = JSONObject(cached) } catch (_: Exception) { }
+        pendingCalendarMissionKey = intent?.getStringExtra("mission_key")
         showSplash {
             pendingNoticeId = intent?.getStringExtra("notice_id")
             when {
                 store.biometricEnabled() -> showBiometricLock()
                 store.load("device_token") != null -> {
                     deviceToken = store.load("device_token")
-                    val requestedTab = if (intent?.getStringExtra("open_tab") == "notices") "notices" else "home"
+                    val requestedTab = requestedStartTab()
                     pendingNoticeId = intent?.getStringExtra("notice_id")
                     showHome(requestedTab)
                     connectAndSync()
@@ -315,14 +329,30 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getStringExtra("open_tab") == "notices") {
-            pendingNoticeId = intent.getStringExtra("notice_id")
-            if (deviceToken != null) {
-                showHome("notices")
-                connectAndSync()
-            } else if (store.biometricEnabled()) showBiometricLock()
-            else notifyShort("برای مشاهده ابلاغیه‌ها ابتدا وارد حساب بازرس شوید")
+        when (intent.getStringExtra("open_tab")) {
+            "notices" -> {
+                pendingNoticeId = intent.getStringExtra("notice_id")
+                if (deviceToken != null) {
+                    showHome("notices")
+                    connectAndSync()
+                } else if (store.biometricEnabled()) showBiometricLock()
+                else notifyShort("برای مشاهده ابلاغیه‌ها ابتدا وارد حساب بازرس شوید")
+            }
+            "calendar" -> {
+                pendingCalendarMissionKey = intent.getStringExtra("mission_key")
+                if (deviceToken != null) {
+                    showHome("calendar")
+                    connectAndSync()
+                } else if (store.biometricEnabled()) showBiometricLock()
+                else notifyShort("برای مشاهده برنامه مأموریت‌ها ابتدا وارد حساب بازرس شوید")
+            }
         }
+    }
+
+    private fun requestedStartTab(): String = when (intent?.getStringExtra("open_tab")) {
+        "notices" -> "notices"
+        "calendar" -> "calendar"
+        else -> "home"
     }
 
     override fun onDestroy() {
@@ -539,6 +569,7 @@ class MainActivity : AppCompatActivity() {
             "کارتابل سربازرس", "بررسی گزارش بازرس" -> showHome("supervisor")
             "تأیید دستگاه", "تأیید هویت" -> showLogin()
             "اطلاعیه‌های سازمانی", "صندوق ابلاغیه‌ها" -> showHome("home")
+            "تقویم مأموریت‌ها" -> showHome("missions")
             "مدیریت نواقص" -> showHome("home")
             "جزئیات نقص" -> showHome("deficiencies")
             "ثبت نقص جدید" -> {
@@ -550,9 +581,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAppMenu() {
-        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "نواقص و پیگیری اصلاحات", "صندوق ابلاغیه‌ها", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
+        val labels = mutableListOf("خانه", "مأموریت‌ها", "تقویم مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "نواقص و پیگیری اصلاحات", "صندوق ابلاغیه‌ها", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
         val actions = mutableListOf<() -> Unit>(
-            { showHome("home") }, { showHome("missions") }, { showHome("departments") },
+            { showHome("home") }, { showHome("missions") }, { showHome("calendar") }, { showHome("departments") },
             { showHome("drafts") }, { showHome("deficiencies") }, { showHome("notices") }, { showHome("analytics") }, { showOfficialReports() }, { showHome("account") }
         )
         if (serverSnapshot.optJSONObject("supervisor")?.optBoolean("can_review", false) == true) {
@@ -770,6 +801,7 @@ class MainActivity : AppCompatActivity() {
         )
         for ((id, caption, drawable) in items) {
             val chosen = activeTab == id ||
+                (id == "missions" && activeTab == "calendar") ||
                 (id == "drafts" && activeTab == "outbox") ||
                 (id == "analytics" && activeTab in setOf("official_reports", "history")) ||
                 (id == "account" && activeTab in setOf("departments", "supervisor", "deficiencies", "evidence"))
@@ -1231,7 +1263,7 @@ class MainActivity : AppCompatActivity() {
             serverSnapshot = payload
             store.save("mobile_sync", payload.toString())
             store.putString("last_sync", Instant.now().toString())
-            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor", "deficiencies", "notices", "evidence") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
+            showHome(if (activeTab in setOf("home", "missions", "calendar", "departments", "drafts", "account", "supervisor", "deficiencies", "notices", "evidence") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
             NoticeNotificationDispatcher.dispatch(this, payload.optJSONArray("notices") ?: JSONArray(), store)
             if (newCount > 0) {
                 sendMissionNotification(newCount)
@@ -1502,10 +1534,219 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    /** Native Jalali mission calendar. Mission records remain server-authoritative and read-only here. */
+    private fun showMissionCalendar() {
+        activeTab = "calendar"
+        val missionsArray = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+        val missions = (0 until missionsArray.length()).mapNotNull { missionsArray.optJSONObject(it) }
+        val dated = missions.filter { MissionScheduleRules.missionDate(it) != null }
+        val undated = missions.filter { MissionScheduleRules.missionDate(it) == null }
+        var selectedDate = PersianCalendar.today()
+        pendingCalendarMissionKey?.takeIf { it.isNotBlank() }?.let { key ->
+            val linkedMissionDate = dated.firstOrNull { missionKey(it) == key }?.let { MissionScheduleRules.missionDate(it) }
+            if (linkedMissionDate != null) {
+                selectedDate = linkedMissionDate
+                pendingCalendarMissionKey = null
+            }
+        }
+        var mode = "month"
+        screen("تقویم مأموریت‌ها", "برنامه روزانه، هفتگی و ماهانه بازدیدها", withNav = true)
+
+        val summary = MaterialCardView(this).apply {
+            radius = dp(16).toFloat(); strokeWidth = dp(1); strokeColor = line
+            cardElevation = 0f; setCardBackgroundColor(navy)
+        }
+        val summaryBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        summaryBody.addView(text("برنامه مأموریت‌های ابلاغ‌شده", 15, true, Color.WHITE))
+        summaryBody.addView(text("${faDigits(missions.size.toString())} مأموریت · ${faDigits(dated.size.toString())} دارای تاریخ", 11, false, Color.rgb(222, 231, 241)).apply {
+            setPadding(0, dp(5), 0, 0)
+        })
+        summary.addView(summaryBody)
+        content.addView(summary)
+        gap(10)
+
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        val modeButtons = linkedMapOf<String, MaterialButton>()
+        val gridArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var renderCalendar: () -> Unit = {}
+        val selectedTitle = text("", 15, true, navy).apply { setPadding(0, dp(12), 0, dp(8)) }
+        val selectedArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val undatedArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val monthTitle = text("", 15, true, navy).apply { gravity = Gravity.CENTER }
+        val periodControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val previous = makeButton("‹", false) { selectedDate = MissionScheduleRules.shiftPeriod(selectedDate, mode, -1); renderCalendar() }
+        val next = makeButton("›", false) { selectedDate = MissionScheduleRules.shiftPeriod(selectedDate, mode, 1); renderCalendar() }
+        previous.textSize = 20f; next.textSize = 20f
+        periodControls.addView(previous, LinearLayout.LayoutParams(dp(48), dp(42)))
+        periodControls.addView(monthTitle, LinearLayout.LayoutParams(0, dp(42), 1f))
+        periodControls.addView(next, LinearLayout.LayoutParams(dp(48), dp(42)))
+        content.addView(periodControls)
+        listOf(Triple("month", "ماهانه", 0), Triple("week", "هفتگی", 1), Triple("day", "روزانه", 2)).forEach { (id, title, index) ->
+            val b = makeButton(title, false) { mode = id; renderCalendar() }.apply {
+                textSize = 11f; minHeight = dp(42); insetTop = 0; insetBottom = 0
+            }
+            modeButtons[id] = b
+            modeRow.addView(b, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                if (index > 0) marginStart = dp(6)
+            })
+        }
+        content.addView(modeRow)
+        gap(6)
+        content.addView(gridArea)
+        content.addView(selectedTitle)
+        content.addView(selectedArea)
+        if (undated.isNotEmpty()) {
+            gap(12)
+            sectionTitle("مأموریت‌های بدون تاریخ مشخص", "همگام‌سازی") { connectAndSync() }
+            content.addView(undatedArea)
+        }
+        secondaryButton("همگام‌سازی برنامه مأموریت‌ها") { connectAndSync() }
+        label("تقویم فقط مأموریت‌های ابلاغ‌شده از پنل سازمان را نمایش می‌دهد؛ تغییر برنامه از طریق پنل مجاز انجام می‌شود.", 10, false, muted)
+
+        fun dayCell(date: String, dayNumber: Int, selected: Boolean, count: Int, enabled: Boolean = true): View {
+            if (!enabled) return View(this)
+            val caption = faDigits(dayNumber.toString()) + if (count > 0) "\n● ${faDigits(count.toString())}" else ""
+            return makeButton(caption, false) {
+                selectedDate = date
+                renderCalendar()
+            }.apply {
+                textSize = if (count > 0) 10f else 12f
+                minHeight = dp(48); insetTop = 0; insetBottom = 0
+                cornerRadius = dp(10)
+                backgroundTintList = ColorStateList.valueOf(if (selected) gold else Color.WHITE)
+                setTextColor(if (selected) navy else ink)
+                strokeColor = ColorStateList.valueOf(if (selected) gold else line)
+                strokeWidth = dp(1)
+                isAllCaps = false
+            }
+        }
+
+        renderCalendar = {
+            val parts = selectedDate.split("/")
+            val year = parts.getOrNull(0)?.toIntOrNull() ?: 1405
+            val month = parts.getOrNull(1)?.toIntOrNull() ?: 1
+            val monthName = MissionScheduleRules.monthTitle(year, month)
+            monthTitle.text = "$monthName ${faDigits(year.toString())}"
+            gridArea.removeAllViews()
+            selectedArea.removeAllViews()
+            undatedArea.removeAllViews()
+            modeButtons.forEach { (id, b) ->
+                val active = mode == id
+                b.backgroundTintList = ColorStateList.valueOf(if (active) navy else Color.WHITE)
+                b.setTextColor(if (active) Color.WHITE else muted)
+                b.strokeColor = ColorStateList.valueOf(if (active) gold else line)
+            }
+            if (mode == "day") {
+                val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+                val prev = makeButton("روز قبل", false) { selectedDate = MissionScheduleRules.shiftDays(selectedDate, -1); renderCalendar() }
+                val curr = makeButton("امروز", false) { selectedDate = PersianCalendar.today(); renderCalendar() }
+                val nxt = makeButton("روز بعد", false) { selectedDate = MissionScheduleRules.shiftDays(selectedDate, 1); renderCalendar() }
+                listOf(prev, curr, nxt).forEachIndexed { i, b ->
+                    nav.addView(b, LinearLayout.LayoutParams(0, dp(42), 1f).apply { if (i > 0) marginStart = dp(5) })
+                }
+                gridArea.addView(nav)
+            } else {
+                val dates = if (mode == "month") {
+                    val days = PersianCalendar.daysInMonth(year, month)
+                    val first = PersianCalendar.toGregorian("%04d/%02d/01".format(year, month))
+                    val offset = first?.let { (it.dayOfWeek.value + 1) % 7 } ?: 0
+                    val total = ((offset + days + 6) / 7) * 7
+                    (0 until total).map { index ->
+                        val day = index - offset + 1
+                        if (day in 1..days) "%04d/%02d/%02d".format(year, month, day) else null
+                    }
+                } else {
+                    MissionScheduleRules.weekDates(selectedDate)
+                }
+                val weekdays = listOf("ش", "ی", "د", "س", "چ", "پ", "ج")
+                val heading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+                weekdays.forEach { day ->
+                    heading.addView(text(day, 10, true, muted).apply { gravity = Gravity.CENTER },
+                        LinearLayout.LayoutParams(0, dp(28), 1f))
+                }
+                gridArea.addView(heading)
+                dates.chunked(7).forEach { week ->
+                    val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+                    week.forEach { date ->
+                        if (date == null) row.addView(View(this), LinearLayout.LayoutParams(0, dp(50), 1f))
+                        else {
+                            val day = date.substringAfterLast('/').toIntOrNull() ?: 1
+                            val count = dated.count { MissionScheduleRules.missionDate(it) == date }
+                            val cell = dayCell(date, day, date == selectedDate, count)
+                            row.addView(cell, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                                setMargins(dp(2), dp(2), dp(2), dp(2))
+                            })
+                        }
+                    }
+                    gridArea.addView(row)
+                }
+            }
+            val dayMissions = dated.filter { MissionScheduleRules.missionDate(it) == selectedDate }
+                .sortedBy { MissionScheduleRules.missionTime(it) ?: "99:99" }
+            selectedTitle.text = "مأموریت‌های ${faDigits(selectedDate.replace('/', '·'))} · ${faDigits(dayMissions.size.toString())} مورد"
+            if (dayMissions.isEmpty()) {
+                val empty = text("برای این روز مأموریتی ثبت نشده است.", 12, false, muted).apply {
+                    gravity = Gravity.CENTER; setPadding(dp(12), dp(18), dp(12), dp(18)); background = rounded(Color.WHITE, 12)
+                }
+                selectedArea.addView(empty)
+            } else dayMissions.forEach { missionItem(it, selectedArea) }
+            undated.forEach { missionItem(it, undatedArea) }
+        }
+        renderCalendar()
+    }
+
+    private fun scheduleMissionReminder(mission: JSONObject) {
+        val key = missionKey(mission)
+        val org = mission.optString("orgName", "دستگاه اجرایی")
+        val scheduled = MissionScheduleRules.scheduledInstant(mission)
+        if (key.isBlank() || scheduled == null) {
+            notifyShort("تاریخ یا ساعت دقیق مأموریت در ابلاغیه موجود نیست؛ یادآوری تنظیم نشد")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            pendingMissionReminder = JSONObject(mission.toString())
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        when (MissionReminderScheduler.schedule(this, key, org, scheduled)) {
+            MissionReminderScheduler.Result.SCHEDULED -> notifyShort("یادآوری یک ساعت قبل از مأموریت تنظیم شد")
+            MissionReminderScheduler.Result.TOO_LATE -> notifyShort("زمان یادآوری این مأموریت گذشته است")
+            MissionReminderScheduler.Result.INVALID -> notifyShort("تاریخ و ساعت مأموریت معتبر نیست")
+        }
+    }
+
+    private fun openMissionMap(mission: JSONObject) {
+        val coords = MissionScheduleRules.coordinates(mission)
+        val label = mission.optString("orgName", "محل مأموریت")
+        val address = MissionScheduleRules.address(mission)
+        val uri = if (coords != null) {
+            Uri.parse("geo:${coords.first},${coords.second}?q=${coords.first},${coords.second}(${Uri.encode(label)})")
+        } else if (address.isNotBlank()) {
+            Uri.parse("geo:0,0?q=${Uri.encode(address)}")
+        } else {
+            notifyShort("نشانی یا مختصات محل مأموریت در اطلاعات ابلاغیه ثبت نشده است")
+            return
+        }
+        val mapIntent = Intent(Intent.ACTION_VIEW, uri)
+        if (mapIntent.resolveActivity(packageManager) != null) startActivity(mapIntent)
+        else notifyShort("برنامه نقشه روی گوشی در دسترس نیست")
+    }
+
     private fun missionItem(mission: JSONObject, destination: LinearLayout = content) {
         val key = missionKey(mission)
         val name = mission.optString("orgName", "دستگاه اجرایی").ifBlank { "دستگاه اجرایی" }
-        val date = faDigits(mission.optString("date", "").trim())
+        val date = faDigits(MissionScheduleRules.missionDate(mission) ?: mission.optString("date", "").trim())
+        val time = MissionScheduleRules.missionTime(mission)?.let { faDigits(it) }
         val available = mission.optBoolean("can_execute", false)
         val isDraft = key.isNotBlank() && missionDraft(mission)
         val state = when {
@@ -1547,6 +1788,7 @@ class MainActivity : AppCompatActivity() {
         info.addView(text(name, 13, true, navy).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
         info.addView(text("کد مأموریت: ${faDigits(key.take(12))}", 9, false, muted).apply { setPadding(0, dp(3), 0, 0) })
         info.addView(text(date.ifBlank { "تاریخ ابلاغ ثبت نشده" }, 10, false, muted).apply { setPadding(0, dp(2), 0, 0) })
+        if (time != null) info.addView(text("ساعت بازدید · $time", 10, true, teal).apply { setPadding(0, dp(3), 0, 0) })
         if (isDraft) {
             val (answered, total) = answeredQuestions(mission)
             info.addView(text("${faDigits(answered.toString())} از ${faDigits(total.toString())} پاسخ", 10, true, teal).apply {
@@ -1725,6 +1967,7 @@ class MainActivity : AppCompatActivity() {
                     if (nextMission != null) showMission(nextMission)
                     else showHome("missions")
                 }
+                secondaryButton("تقویم و برنامه مأموریت‌ها") { showHome("calendar") }
                 val deficiencyCount = runCatching { deficiencies.entries().count { !it.optBoolean("integrity_error") } }.getOrDefault(0)
                 secondaryButton("مدیریت نواقص و پیگیری اصلاحات · ${faDigits(deficiencyCount.toString())}") {
                     showHome("deficiencies")
@@ -1751,8 +1994,10 @@ class MainActivity : AppCompatActivity() {
                 label("پیش‌نویس‌ها به‌صورت امن روی دستگاه ذخیره می‌شوند؛ ارسال نهایی گزارش نیازمند اتصال اینترنت است.", 10, false, muted)
             }
             "supervisor" -> showSupervisorInbox()
+            "calendar" -> showMissionCalendar()
             "missions" -> {
                 screen("مأموریت‌های من", "جست‌وجو و پیگیری مأموریت‌های ابلاغ‌شده", withNav = true)
+                secondaryButton("نمایش تقویم مأموریت‌ها") { showHome("calendar") }
                 val search = field("جست‌وجوی نام اداره")
                 search.setSingleLine(true)
                 search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
@@ -2930,7 +3175,20 @@ class MainActivity : AppCompatActivity() {
         ))
         summary.addView(summaryInside)
         content.addView(summary)
-        gap(12)
+        gap(8)
+        if (MissionScheduleRules.scheduledDateTime(mission) != null) {
+            secondaryButton("تنظیم یادآوری یک ساعت قبل از بازدید") { scheduleMissionReminder(mission) }
+            secondaryButton("لغو یادآوری این مأموریت") {
+                MissionReminderScheduler.cancel(this, missionKey(mission))
+                notifyShort("درخواست لغو یادآوری ثبت شد")
+            }
+        } else {
+            label("برای فعال‌شدن یادآوری، تاریخ و ساعت مأموریت باید در ابلاغیه ثبت شده باشد.", 10, false, muted)
+        }
+        if (MissionScheduleRules.hasMapLocation(mission)) {
+            secondaryButton("مسیریابی تا محل مأموریت") { openMissionMap(mission) }
+        }
+        gap(8)
 
         if (!enabled) {
             val schedule = mission.optString("schedule_label", "نامشخص")
@@ -5351,7 +5609,8 @@ class MainActivity : AppCompatActivity() {
                     try {
                         deviceToken = store.decryptBio(authorized)
                         store.saveDurable("notification_device_token", deviceToken!!)
-                        val requestedTab = if (intent?.getStringExtra("open_tab") == "notices") "notices" else "home"
+                        val requestedTab = requestedStartTab()
+                        pendingCalendarMissionKey = intent?.getStringExtra("mission_key")
                         showHome(requestedTab)
                         connectAndSync()
                     }
@@ -5370,6 +5629,7 @@ class MainActivity : AppCompatActivity() {
                 store.clearDurable("device_token");store.clearDurable("notification_device_token");store.clearBio()
                 store.clearDurable("pending_notice_reads");store.clearDurable("notice_notified_ids")
                 NoticePollingScheduler.cancel(this)
+                MissionReminderScheduler.cancelAll(this)
                 store.putString("notify_notices_enabled", "no")
                 store.removeStringDurable("request_id")
                 store.clearDurable("mobile_sync")
