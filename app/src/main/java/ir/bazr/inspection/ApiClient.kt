@@ -86,6 +86,40 @@ class ApiClient(private val base: String) {
         } finally { conn.disconnect() }
     }
 
+    /** Download a question attachment already submitted by this authenticated inspector. */
+    fun downloadInspectorEvidence(uploadId: Int, bearer: String): Pair<ByteArray, String> {
+        require(uploadId > 0)
+        val conn = (URL(base + "mobile_file.php?upload_id=$uploadId").openConnection() as HttpURLConnection)
+        try {
+            conn.requestMethod = "GET"
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 45_000
+            conn.setRequestProperty("Authorization", "Bearer $bearer")
+            conn.setRequestProperty("Accept", "image/*,application/pdf,application/octet-stream")
+            if (conn.responseCode != 200) throw ApiException(conn.responseCode, "inspector_evidence_unavailable", "")
+            val mime = conn.contentType.orEmpty().substringBefore(';').ifBlank { "application/octet-stream" }
+            if (!(mime.startsWith("image/") || mime == "application/pdf" || mime == "application/octet-stream")) {
+                throw UserActionException("نوع فایل مستند پشتیبانی نمی‌شود")
+            }
+            val declared = conn.contentLengthLong
+            if (declared > 12L * 1024 * 1024) throw UserActionException("حجم مستند بیش از حد مجاز است")
+            val out = ByteArrayOutputStream()
+            conn.inputStream.use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (out.size() + read > 12 * 1024 * 1024) throw UserActionException("حجم مستند بیش از حد مجاز است")
+                    out.write(buffer, 0, read)
+                }
+            }
+            val bytes = out.toByteArray()
+            if (bytes.isEmpty()) throw UserActionException("فایل مستند خالی است")
+            return Pair(bytes, mime)
+        } finally { conn.disconnect() }
+    }
+
     /** PDF is downloaded as binary from an authenticated, fixed endpoint (never an arbitrary URL). */
     fun downloadOfficialPdf(submissionId: Int, kind: String, bearer: String): ByteArray {
         require(submissionId > 0 && kind in setOf("summary", "detailed"))

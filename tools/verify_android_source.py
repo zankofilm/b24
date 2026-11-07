@@ -80,6 +80,30 @@ for required in ("نیازمند توضیح و مستند", "انتخاب سری
     if required not in main_activity:
         errors.append(f"Missing 4.16 assessment UI element: {required}")
 
+# Version 4.17 offline-first deficiency tracking; no server acceptance is implied locally.
+deficiency_store = MAIN / "java" / "ir" / "bazr" / "inspection" / "DeficiencyStore.kt"
+deficiency_rules = MAIN / "java" / "ir" / "bazr" / "inspection" / "DeficiencyWorkflowRules.kt"
+if not deficiency_store.is_file() or not deficiency_rules.is_file():
+    errors.append("Missing 4.17 deficiency workflow store/rules")
+else:
+    store_text = deficiency_store.read_text(encoding="utf-8")
+    rules_text = deficiency_rules.read_text(encoding="utf-8")
+    for required in ("saveDurable", "linked_evidence_refs", "events", "local_pending", "pendingEntries", "mergeServerFinding", "resolveConflictUseServer", "resolveConflictKeepLocal", "isEvidenceReferenced", "changeStatus", "inspector_ref", "[A-Za-z0-9_-]{1,64}"):
+        if required not in store_text:
+            errors.append(f"Deficiency store missing required behavior: {required}")
+    for required in ("AWAITING_VERIFICATION", "APPROVED", "REJECTED", "serverStatus", "fromServerStatus", "canTransition", "isOverdue"):
+        if required not in rules_text:
+            errors.append(f"Deficiency workflow rules missing: {required}")
+for required in ("private fun showDeficiencies(", "private fun showDeficiencyEditor(", "private fun showDeficiencyDetail(", "private fun syncPendingDeficiencies(", "mobile_finding.php", "ثبت نقص برای این شاخص", "در انتظار اتصال سرور", "پذیرش نسخه آخر سرور", "canManageDeficiency", "همگام‌سازی نقص با سامانه"):
+    if required not in main_activity:
+        errors.append(f"Missing 4.17 deficiency UI element: {required}")
+if 'if (!runCatching { deficiencies.isEvidenceReferenced(reference) }.getOrDefault(true))' not in main_activity:
+    errors.append("Evidence referenced by a deficiency must be preserved after report receipt")
+if 'DeficiencyWorkflowRules.canInspectorManage(record.optString("source"), recordRef, currentRef)' not in main_activity:
+    errors.append("Finding mutations must be limited to the originating inspector")
+if 'if (!online()) { notifyShort("برای ثبت تغییر وضعیت' not in main_activity:
+    errors.append("Status changes must not be committed locally while offline")
+
 diagnostics = MAIN / "java" / "ir" / "bazr" / "inspection" / "AppDiagnostics.kt"
 if not diagnostics.is_file():
     errors.append("Missing on-device diagnostics helper: AppDiagnostics.kt")
@@ -88,8 +112,8 @@ if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostic
 
 
 # Version 4.15 draft workflow and 4.16 checklist assessment regression guards.
-if 'versionName = "4.16.0"' not in gradle_file or 'versionCode = 30' not in gradle_file:
-    errors.append("Expected BAZR Android 4.16.0 / versionCode 30")
+if 'versionName = "4.17.0"' not in gradle_file or 'versionCode = 31' not in gradle_file:
+    errors.append("Expected BAZR Android 4.17.0 / versionCode 31")
 for required in (
     'var renderDraftCards: () -> Unit = {}',
     '"در حال تکمیل"',
@@ -130,5 +154,7 @@ print(" - GitHub artifact version synchronized")
 print(" - Required login design assets present")
 print(" - 4.15 draft filters, progress and queue guards verified")
 print(" - 4.16 checklist engine, section overview and validation guards verified")
+print(" - 4.17 encrypted deficiency tracking, audit history and ownership checks verified")
+print(" - Offline status changes are blocked until the finding has a server receipt")
 print(" - Backward-compatible local draft timestamp verified")
 print(" - Duplicate TextInput parent attachment guard enabled")

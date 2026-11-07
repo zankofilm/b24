@@ -3,6 +3,7 @@ package ir.bazr.inspection
 import android.content.Intent
 import android.Manifest
 import android.app.Notification
+import android.app.DatePickerDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -61,6 +62,7 @@ import com.google.android.material.progressindicator.LinearProgressIndicator
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.time.LocalDate
 import java.util.UUID
 import java.security.MessageDigest
 import java.io.IOException
@@ -80,6 +82,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var outbox: SubmissionQueue
     private lateinit var receiptHistory: ReceiptHistory
     private lateinit var signatures: SignedDraft
+    private lateinit var deficiencies: DeficiencyStore
+    private var selectedDeficiencyId: String? = null
     private var bulkPending: ArrayDeque<String>? = null
     private var bulkOk = 0
     private var bulkFailed = 0
@@ -247,6 +251,7 @@ class MainActivity : AppCompatActivity() {
         outbox = SubmissionQueue(store)
         receiptHistory = ReceiptHistory(store)
         signatures = SignedDraft(store)
+        deficiencies = DeficiencyStore(store)
         // Remove unreferenced, temporary plaintext camera files left by interrupted captures.
         val pendingName = store.load("pending_capture")?.let { runCatching { JSONObject(it).optString("name") }.getOrNull() }
         File(cacheDir, "camera").listFiles()?.filter { it.name != pendingName && it.lastModified() < System.currentTimeMillis() - 86_400_000L }
@@ -254,14 +259,22 @@ class MainActivity : AppCompatActivity() {
         store.getString("device_id") ?: store.putStringDurable("device_id", UUID.randomUUID().toString())
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (checklistOverviewVisible && selectedMission != null) {
-                    val mission = selectedMission!!
-                    checklistOverviewVisible = false
-                    showMission(mission, currentQuestionIndex)
-                } else if (selectedMission != null) showHome("missions")
-                else if (activeTab == "outbox") showHome("drafts")
-                else if (activeTab != "home" && ::content.isInitialized) showHome("home")
-                else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                when (activeTab) {
+                    "deficiency_detail" -> showHome("deficiencies")
+                    "deficiency_editor" -> {
+                        val mission = selectedMission
+                        if (mission != null) showMission(mission, currentQuestionIndex) else showHome("deficiencies")
+                    }
+                    "deficiencies" -> showHome("home")
+                    else -> if (checklistOverviewVisible && selectedMission != null) {
+                        val mission = selectedMission!!
+                        checklistOverviewVisible = false
+                        showMission(mission, currentQuestionIndex)
+                    } else if (selectedMission != null) showHome("missions")
+                    else if (activeTab == "outbox") showHome("drafts")
+                    else if (activeTab != "home" && ::content.isInitialized) showHome("home")
+                    else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                }
             }
         })
         val cached = store.load("mobile_sync")
@@ -425,7 +438,8 @@ class MainActivity : AppCompatActivity() {
             "مأموریت‌های من", "فرم بازرسی", "ثبت بازرسی", "بازبینی گزارش", "مرور گزارش", "نمای کلی شاخص‌ها",
             "پیش‌نویس‌های من", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "سوابق بازرسی",
             "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "ارسال گزارش‌ها", "کارتابل سربازرس",
-            "بررسی گزارش بازرس", "تأیید دستگاه", "اطلاعیه‌های سازمانی", "تأیید هویت"
+            "بررسی گزارش بازرس", "تأیید دستگاه", "اطلاعیه‌های سازمانی", "تأیید هویت", "مدیریت نواقص",
+            "جزئیات نقص", "ثبت نقص جدید"
         )
         val showBack = pageTitle in backPages
         val wrapper = LinearLayout(this).apply {
@@ -493,15 +507,21 @@ class MainActivity : AppCompatActivity() {
             "کارتابل سربازرس", "بررسی گزارش بازرس" -> showHome("supervisor")
             "تأیید دستگاه", "تأیید هویت" -> showLogin()
             "اطلاعیه‌های سازمانی" -> showHome("account")
+            "مدیریت نواقص" -> showHome("home")
+            "جزئیات نقص" -> showHome("deficiencies")
+            "ثبت نقص جدید" -> {
+                val mission = selectedMission
+                if (mission != null) showMission(mission, currentQuestionIndex) else showHome("deficiencies")
+            }
             else -> showHome("home")
         }
     }
 
     private fun showAppMenu() {
-        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
+        val labels = mutableListOf("خانه", "مأموریت‌ها", "ادارات مجاز", "پیش‌نویس‌ها", "نواقص و پیگیری اصلاحات", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "حساب کاربری")
         val actions = mutableListOf<() -> Unit>(
             { showHome("home") }, { showHome("missions") }, { showHome("departments") },
-            { showHome("drafts") }, { showHome("analytics") }, { showOfficialReports() }, { showHome("account") }
+            { showHome("drafts") }, { showHome("deficiencies") }, { showHome("analytics") }, { showOfficialReports() }, { showHome("account") }
         )
         if (serverSnapshot.optJSONObject("supervisor")?.optBoolean("can_review", false) == true) {
             labels.add(4, "کارتابل سربازرس")
@@ -719,7 +739,7 @@ class MainActivity : AppCompatActivity() {
             val chosen = activeTab == id ||
                 (id == "drafts" && activeTab == "outbox") ||
                 (id == "analytics" && activeTab in setOf("official_reports", "history")) ||
-                (id == "account" && activeTab in setOf("notices", "departments", "supervisor"))
+                (id == "account" && activeTab in setOf("notices", "departments", "supervisor", "deficiencies"))
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -1112,13 +1132,19 @@ class MainActivity : AppCompatActivity() {
         if (activeTab == "home") showHome("home")
         work({
             val session = sessionFor(token)
+            val syncedDeficiencies = syncPendingDeficiencies(session)
             val payload = api.get("mobile_sync.php", session)
+            payload.put("deficiency_sync_count", syncedDeficiencies)
             val supervisorInbox = try { api.get("mobile_supervisor_inbox.php", session) }
                 catch (error: ApiException) {
                     if (error.status in setOf(403, 404)) JSONObject().put("ok", true).put("can_review", false).put("items", JSONArray())
                     else throw error
                 }
             payload.put("supervisor", supervisorInbox)
+            val serverFindings = payload.optJSONArray("findings") ?: JSONArray()
+            for (i in 0 until serverFindings.length()) {
+                serverFindings.optJSONObject(i)?.let { deficiencies.mergeServerFinding(it) }
+            }
             Pair(session, payload)
         }) { (session, payload) ->
             val previous = serverSnapshot.optJSONArray("missions") ?: JSONArray()
@@ -1135,12 +1161,68 @@ class MainActivity : AppCompatActivity() {
             serverSnapshot = payload
             store.save("mobile_sync", payload.toString())
             store.putString("last_sync", Instant.now().toString())
-            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
+            showHome(if (activeTab in setOf("home", "missions", "departments", "drafts", "account", "supervisor", "deficiencies") && (activeTab != "supervisor" || payload.optJSONObject("supervisor")?.optBoolean("can_review", false) == true)) activeTab else "home")
             if (newCount > 0) {
                 sendMissionNotification(newCount)
                 notifyShort("$newCount مأموریت جدید دریافت شد؛ از فهرست مأموریت‌ها مشاهده کنید")
             }
         }
+    }
+
+    private fun findingPayload(record: JSONObject): JSONObject {
+        val id = record.optString("id").toLongOrNull() ?: throw UserActionException("شناسه نقص معتبر نیست")
+        val missionKey = record.optString("mission_key")
+        val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+        val mission = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }.firstOrNull { missionKey(it) == missionKey }
+        val missionId = mission?.opt("id") ?: missionKey
+        return JSONObject()
+            .put("id", id)
+            .put("missionId", missionId)
+            .put("missionKey", missionKey)
+            .put("orgId", record.optString("organization_id"))
+            .put("orgName", record.optString("organization"))
+            .put("questionId", record.optString("question_id"))
+            .put("questionIndex", record.optInt("question_index"))
+            .put("sectionId", record.optString("section_id"))
+            .put("questionTitle", record.optString("question_title"))
+            .put("title", record.optString("question_title"))
+            .put("description", record.optString("description"))
+            .put("severity", DeficiencyWorkflowRules.serverSeverity(record.optString("severity")))
+            .put("status", DeficiencyWorkflowRules.serverStatus(record.optString("status")))
+            .put("dueDate", record.optString("due_date_jalali"))
+            .put("resolutionNote", record.optString("resolution_note"))
+            .put("createdAt", record.optString("created_at"))
+            .put("updatedAt", record.optString("updated_at"))
+            .put("expectedServerUpdatedAt", record.optString("server_updated_at"))
+            .put("source", "android_inspector")
+            .put("inspectorRef", serverSnapshot.optJSONObject("profile")?.optString("inspector_ref", "").orEmpty())
+            .put("createdBy", record.optString("created_by", deficiencyActor()))
+    }
+
+    private fun syncOneDeficiency(record: JSONObject, bearer: String) {
+        val id = record.optString("id")
+        val action = if (record.optString("server_id").isBlank()) "create" else "update"
+        val request = JSONObject()
+            .put("action", action)
+            .put("mission_key", record.optString("mission_key"))
+            .put("finding_key", id)
+            .put("payload", findingPayload(record))
+        try {
+            val response = api.post("mobile_finding.php", request, bearer, "finding-$id")
+            deficiencies.markSynced(id, id, response.optString("updated_at"))
+        } catch (error: Exception) {
+            deficiencies.markSyncError(id, AppErrorMessages.forUser(error))
+            throw error
+        }
+    }
+
+    private fun syncPendingDeficiencies(bearer: String): Int {
+        var synced = 0
+        deficiencies.pendingEntries().forEach { record ->
+            try { syncOneDeficiency(record, bearer); synced++ }
+            catch (_: Exception) { /* Keep this item pending; do not block mission sync. */ }
+        }
+        return synced
     }
 
     private fun missionKey(mission: JSONObject): String =
@@ -1551,6 +1633,10 @@ class MainActivity : AppCompatActivity() {
                     val nextMission = available.firstOrNull()
                     if (nextMission != null) showMission(nextMission)
                     else showHome("missions")
+                }
+                val deficiencyCount = runCatching { deficiencies.entries().count { !it.optBoolean("integrity_error") } }.getOrDefault(0)
+                secondaryButton("مدیریت نواقص و پیگیری اصلاحات · ${faDigits(deficiencyCount.toString())}") {
+                    showHome("deficiencies")
                 }
                 sectionTitle("مأموریت‌های اخیر", "مشاهده همه") { showHome("missions") }
                 if (all.isEmpty()) {
@@ -1995,6 +2081,7 @@ class MainActivity : AppCompatActivity() {
                 gap(8)
                 label("ذخیره خودکار روی دستگاه فعال است. گزارش تا زمان دریافت رسید معتبر سرور، ارسال‌شده محسوب نمی‌شود.", 10, false, muted)
             }
+            "deficiencies" -> showDeficiencies()
             "account" -> {
                 screen("پروفایل و تنظیمات", "مدیریت حساب و امنیت دستگاه", withNav = true)
                 val profileCard = MaterialCardView(this).apply {
@@ -2670,6 +2757,7 @@ class MainActivity : AppCompatActivity() {
 
     /** One independent, vertically-scrollable page per checklist section (شاخص). */
     private fun showMission(mission: JSONObject, questionIndex: Int = 0) {
+        activeTab = "mission"
         val key = missionKey(mission)
         if (key.isBlank()) { notifyShort("شناسه مأموریت نامعتبر است"); return }
         if (outbox.get(key) != null) {
@@ -3082,7 +3170,7 @@ class MainActivity : AppCompatActivity() {
                         .setPositiveButton("حذف مستند") { _, _ ->
                             if (EvidenceRefs.remove(draft.attachments, id, reference)) {
                                 if (saveDraftSafely(draft)) {
-                                    if (reference !in EvidenceRefs.all(draft.attachments)) evidenceVault.delete(reference)
+                                    if (reference !in EvidenceRefs.all(draft.attachments) && !runCatching { deficiencies.isEvidenceReferenced(reference) }.getOrDefault(true)) evidenceVault.delete(reference)
                                 } else {
                                     EvidenceRefs.add(draft.attachments, id, reference)
                                     return@setPositiveButton
@@ -3096,6 +3184,23 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(5) })
             }
+            val questionDeficiencies = runCatching { deficiencies.forQuestion(key, id) }.getOrDefault(emptyList())
+            if (questionDeficiencies.isNotEmpty()) {
+                inside.addView(text("${faDigits(questionDeficiencies.size.toString())} نقص ثبت‌شده برای این شاخص", 10, true, Color.rgb(150, 96, 31)).apply {
+                    setPadding(0, dp(7), 0, dp(5))
+                })
+            }
+            val deficiencyAction = makeButton(
+                if (questionDeficiencies.isEmpty()) "ثبت نقص برای این شاخص" else "ثبت نقص جدید · ${faDigits(questionDeficiencies.size.toString())} سابقه",
+                false
+            ) { showDeficiencyEditor(mission, id, questionText, globalIndex) }.apply {
+                textSize = 11f
+                setIconResource(R.drawable.ic_notes)
+                iconTint = ColorStateList.valueOf(navy)
+            }
+            inside.addView(deficiencyAction, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(45)
+            ).apply { topMargin = dp(7) })
             panel.addView(inside)
             content.addView(panel, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3155,6 +3260,542 @@ class MainActivity : AppCompatActivity() {
         shell.addView(footer, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
         ))
+    }
+
+    private fun deficiencyActor(): String = serverSnapshot.optJSONObject("profile")
+        ?.optString("name", "بازرس")?.takeIf { it.isNotBlank() } ?: "بازرس"
+
+    private fun deficiencyDateLabel(value: String): String {
+        val jalali = PersianCalendar.normalize(value) ?: runCatching { PersianCalendar.fromGregorian(LocalDate.parse(value)) }.getOrDefault(value)
+        return faDigits(jalali)
+    }
+
+    private fun showDeficiencies() {
+        activeTab = "deficiencies"
+        selectedDeficiencyId = null
+        selectedMission = null
+        openDraft = null
+        screen("مدیریت نواقص", "ثبت، پیگیری و بازدید مجدد", withNav = true)
+
+        val all = runCatching { deficiencies.entries() }.getOrElse {
+            AppDiagnostics.record(this, "deficiency_list", it as? Exception ?: Exception(it))
+            emptyList()
+        }
+        val valid = all.filterNot { it.optBoolean("integrity_error") }
+        val openCount = valid.count { it.optString("status") == DeficiencyWorkflowRules.OPEN }
+        val progressCount = valid.count { it.optString("status") == DeficiencyWorkflowRules.IN_PROGRESS }
+        val verifyCount = valid.count { it.optString("status") == DeficiencyWorkflowRules.AWAITING_VERIFICATION }
+        val verifiedCount = valid.count { it.optString("status") == DeficiencyWorkflowRules.APPROVED }
+        val rejectedCount = valid.count { it.optString("status") == DeficiencyWorkflowRules.REJECTED }
+        val pendingSync = valid.count { it.optString("sync_state") != "synced" }
+        val overdueCount = valid.count {
+            DeficiencyWorkflowRules.isOverdue(it.optString("due_date_jalali", it.optString("due_date")), it.optString("status"))
+        }
+
+        val heroCard = MaterialCardView(this).apply {
+            radius = dp(18).toFloat(); strokeWidth = dp(1); strokeColor = gold
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(navy)
+        }
+        val heroBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14))
+        }
+        heroBody.addView(text("چرخه پیگیری اصلاحات", 16, true, Color.WHITE))
+        heroBody.addView(text("${faDigits(valid.size.toString())} نقص · ${faDigits(pendingSync.toString())} مورد ذخیره‌شده روی دستگاه و در انتظار اتصال سرور", 10, false, Color.rgb(220, 231, 242)).apply {
+            setPadding(0, dp(5), 0, dp(10))
+        })
+        val metrics = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        fun metric(value: Int, caption: String, tone: Int) {
+            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = rounded(Color.argb(28, 255, 255, 255), 10); setPadding(dp(5), dp(8), dp(5), dp(8)) }
+            box.addView(text(faDigits(value.toString()), 18, true, Color.WHITE).apply { gravity = Gravity.CENTER })
+            box.addView(text(caption, 9, true, tone).apply { gravity = Gravity.CENTER; maxLines = 1 })
+            metrics.addView(box, LinearLayout.LayoutParams(0, dp(58), 1f).apply { marginStart = dp(4); marginEnd = dp(4) })
+        }
+        metric(openCount, "ثبت‌شده", Color.rgb(244, 214, 146))
+        metric(progressCount, "در پیگیری", Color.rgb(244, 214, 146))
+        metric(verifyCount, "بازدید مجدد", Color.rgb(244, 214, 146))
+        metric(verifiedCount, "تأیید نهایی", Color.rgb(178, 231, 199))
+        heroBody.addView(metrics)
+        heroCard.addView(heroBody)
+        content.addView(heroCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(11) })
+
+        if (overdueCount > 0) {
+            content.addView(text("${faDigits(overdueCount.toString())} نقص از مهلت اصلاح عبور کرده است.", 11, true, Color.rgb(154, 61, 44)).apply {
+                background = rounded(Color.rgb(252, 237, 233), 11); setPadding(dp(11), dp(10), dp(11), dp(10))
+            })
+            gap(8)
+        }
+        goldButton("ثبت نقص جدید  +") { chooseDeficiencyMission() }
+        secondaryButton("همگام‌سازی نواقص با سامانه") {
+            if (deviceToken == null) notifyShort("برای همگام‌سازی ابتدا وارد حساب بازرس شوید") else connectAndSync()
+        }
+        val search = field("جست‌وجوی اداره، شاخص یا شرح نقص")
+        search.setSingleLine(true)
+        search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
+        search.compoundDrawablePadding = dp(8)
+        val filters = listOf(
+            "all" to "همه",
+            DeficiencyWorkflowRules.OPEN to "ثبت‌شده",
+            DeficiencyWorkflowRules.IN_PROGRESS to "در پیگیری",
+            DeficiencyWorkflowRules.AWAITING_VERIFICATION to "تأیید سربازرس",
+            DeficiencyWorkflowRules.REJECTED to "رد رفع",
+            DeficiencyWorkflowRules.APPROVED to "تأیید نهایی"
+        )
+        var selectedFilter = "all"
+        val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        val filterViews = linkedMapOf<String, TextView>()
+        filters.forEach { (key, caption) ->
+            val chipView = text(caption, 10, true, muted).apply {
+                gravity = Gravity.CENTER; setPadding(dp(10), dp(8), dp(10), dp(8)); background = rounded(Color.WHITE, 18)
+                isClickable = true; isFocusable = true
+                setOnClickListener { selectedFilter = key; renderRows() }
+            }
+            filterViews[key] = chipView
+            filterRow.addView(chipView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(37)).apply { marginEnd = dp(5) })
+        }
+        val filterScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(filterRow, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        content.addView(filterScroll)
+        val resultCount = text("", 11, false, muted).apply { setPadding(0, dp(9), 0, dp(6)) }
+        content.addView(resultCount)
+        val resultHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(resultHost)
+
+        fun renderRows() {
+            filterViews.forEach { (key, view) ->
+                val chosen = key == selectedFilter
+                view.setTextColor(if (chosen) Color.WHITE else muted)
+                view.background = rounded(if (chosen) navy else Color.WHITE, 18)
+            }
+            resultHost.removeAllViews()
+            val query = search.text?.toString()?.trim().orEmpty()
+            val rows = all.filter { record ->
+                if (record.optBoolean("integrity_error")) return@filter true
+                val statusOk = selectedFilter == "all" || record.optString("status") == selectedFilter
+                val queryOk = query.isBlank() || listOf("organization", "question_title", "description", "mission_key")
+                    .any { record.optString(it).contains(query, ignoreCase = true) }
+                statusOk && queryOk
+            }
+            resultCount.text = "${faDigits(rows.size.toString())} مورد از ${faDigits(all.size.toString())} سابقه"
+            if (rows.isEmpty()) {
+                val empty = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = rounded(Color.WHITE, 16); setPadding(dp(18), dp(22), dp(18), dp(22)) }
+                empty.addView(icon(R.drawable.ic_notes, muted, 30))
+                empty.addView(text("نقصی در این فهرست وجود ندارد", 14, true, navy).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(4)) })
+                empty.addView(text("از داخل فرم بازرسی یا دکمه ثبت نقص جدید، موردی را ثبت کنید.", 11, false, muted).apply { gravity = Gravity.CENTER })
+                resultHost.addView(empty)
+            } else rows.forEach { record ->
+                val card = MaterialCardView(this).apply {
+                    radius = dp(16).toFloat(); strokeWidth = dp(1); strokeColor = line
+                    cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+                    isClickable = true; isFocusable = true
+                    setOnClickListener { showDeficiencyDetail(record) }
+                }
+                val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(12), dp(13), dp(12)) }
+                if (record.optBoolean("integrity_error")) {
+                    body.addView(text("رکورد نقص قابل بازیابی نیست", 13, true, Color.rgb(160, 55, 45)))
+                    body.addView(text("اطلاعات اصلی حذف نشده؛ برای جلوگیری از آسیب، این رکورد فقط‌خواندنی است.", 10, false, muted))
+                } else {
+                    val status = record.optString("status")
+                    val severity = record.optString("severity")
+                    val overdue = DeficiencyWorkflowRules.isOverdue(record.optString("due_date_jalali", record.optString("due_date")), status)
+                    val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL; gravity = Gravity.CENTER_VERTICAL }
+                    val severityColor = when (severity) {
+                        DeficiencyWorkflowRules.CRITICAL, DeficiencyWorkflowRules.HIGH -> Color.rgb(164, 61, 49)
+                        DeficiencyWorkflowRules.MEDIUM -> Color.rgb(153, 103, 35)
+                        else -> Color.rgb(65, 105, 91)
+                    }
+                    header.addView(chip(DeficiencyWorkflowRules.severityLabel(severity), Color.rgb(250, 241, 226), severityColor).apply { textSize = 9f })
+                    header.addView(text(DeficiencyWorkflowRules.statusLabel(status), 10, true, navy).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), 0, dp(8), 0) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    if (overdue) header.addView(chip("مهلت گذشته", Color.rgb(252, 235, 232), Color.rgb(165, 55, 45)).apply { textSize = 8f })
+                    body.addView(header)
+                    body.addView(text(record.optString("organization", "دستگاه اجرایی"), 14, true, navy).apply { setPadding(0, dp(8), 0, dp(3)) })
+                    body.addView(text("شاخص ${faDigits((record.optInt("question_index") + 1).toString())} · ${record.optString("question_title")}", 11, true, ink).apply { maxLines = 2 })
+                    body.addView(text(record.optString("description"), 10, false, muted).apply { maxLines = 2; setPadding(0, dp(5), 0, dp(5)) })
+                    body.addView(text("مهلت اصلاح: ${deficiencyDateLabel(record.optString("due_date_jalali", record.optString("due_date")))} · مستند مرتبط: ${faDigits(record.optInt("linked_evidence_count").toString())}", 9, false, muted))
+                    val syncText = when (record.optString("sync_state")) {
+                        "synced" -> "همگام‌شده با سامانه"
+                        "failed" -> "خطا در همگام‌سازی"
+                        "conflict" -> "تعارض نسخه؛ نیازمند بررسی بازرس"
+                        else -> "ذخیره امن روی دستگاه · در انتظار اتصال سرور"
+                    }
+                    body.addView(text(syncText, 9, true, when (record.optString("sync_state")) {
+                        "synced" -> Color.rgb(35, 125, 80)
+                        "conflict", "failed" -> Color.rgb(165, 55, 45)
+                        else -> Color.rgb(150, 96, 31)
+                    }).apply { setPadding(0, dp(6), 0, 0) })
+                }
+                card.addView(body)
+                resultHost.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(9) })
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderRows()
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        renderRows()
+        gap(7)
+        label("سوابق این نسخه به‌صورت رمزنگاری‌شده روی گوشی نگهداری می‌شوند. تا اتصال endpoint اختصاصی و تأیید رسید سرور، هیچ موردی همگام‌شده تلقی نمی‌شود.", 10, false, muted)
+    }
+
+    private fun chooseDeficiencyMission() {
+        val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+        val candidates = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }
+            .filter { missionKey(it).isNotBlank() && (it.optJSONObject("checklistSnapshot")?.optJSONArray("questions")?.length() ?: 0) > 0 }
+        if (candidates.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("مأموریتی برای ثبت نقص موجود نیست")
+                .setMessage("ابتدا مأموریت‌های خود را از سرور همگام‌سازی کنید یا از داخل یک فرم بازرسی، نقص همان شاخص را ثبت کنید.")
+                .setPositiveButton("متوجه شدم", null).show()
+            return
+        }
+        val labels = candidates.map { "${it.optString("orgName", "دستگاه اجرایی")} · ${it.optString("date", "")}" }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("انتخاب اداره و مأموریت")
+            .setItems(labels) { _, index -> chooseDeficiencyQuestion(candidates[index]) }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun chooseDeficiencyQuestion(mission: JSONObject) {
+        val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
+        val valid = (0 until questions.length()).mapNotNull { index ->
+            val question = questions.optJSONObject(index) ?: return@mapNotNull null
+            val id = question.optString("id").trim()
+            if (id.isBlank()) null else Triple(index, id, question.optString("text", question.optString("title", question.optString("question", id))))
+        }
+        if (valid.isEmpty()) { notifyShort("شاخص معتبری برای ثبت نقص پیدا نشد"); return }
+        val labels = valid.map { "${faDigits((it.first + 1).toString())}. ${it.third}" }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("انتخاب شاخص دارای نقص")
+            .setItems(labels) { _, index ->
+                val item = valid[index]
+                showDeficiencyEditor(mission, item.second, item.third, item.first)
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun showDeficiencyEditor(mission: JSONObject, questionId: String, questionTitle: String, questionIndex: Int) {
+        activeTab = "deficiency_editor"
+        selectedMission = mission
+        selectedMissionKey = missionKey(mission)
+        screen("ثبت نقص جدید", mission.optString("orgName", "دستگاه اجرایی"))
+        val info = MaterialCardView(this).apply { radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line; cardElevation = 0f; setCardBackgroundColor(Color.WHITE) }
+        val infoBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(12), dp(13), dp(12)) }
+        infoBody.addView(text(mission.optString("orgName", "دستگاه اجرایی"), 14, true, navy))
+        infoBody.addView(text("شاخص ${faDigits((questionIndex + 1).toString())} · $questionTitle", 11, false, muted).apply { setPadding(0, dp(5), 0, 0) })
+        info.addView(infoBody)
+        content.addView(info)
+        gap(12)
+        val descriptionInput = field("توضیحات و شرح نقص (حداقل ۸ نویسه)")
+        label("شدت نقص", 13, true, navy)
+        var selectedSeverity = DeficiencyWorkflowRules.MEDIUM
+        val severityOptions = listOf(
+            DeficiencyWorkflowRules.CRITICAL to "بحرانی",
+            DeficiencyWorkflowRules.HIGH to "زیاد",
+            DeficiencyWorkflowRules.MEDIUM to "متوسط",
+            DeficiencyWorkflowRules.LOW to "کم"
+        )
+        val severityRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        val severityButtons = linkedMapOf<String, TextView>()
+        fun refreshSeverity() {
+            severityButtons.forEach { (key, view) ->
+                val chosen = key == selectedSeverity
+                view.setTextColor(if (chosen) Color.WHITE else navy)
+                view.background = rounded(if (chosen) navy else Color.WHITE, 11)
+            }
+        }
+        severityOptions.forEach { (key, caption) ->
+            val view = text(caption, 10, true, navy).apply {
+                gravity = Gravity.CENTER; setPadding(dp(5), dp(10), dp(5), dp(10)); background = rounded(Color.WHITE, 11)
+                isClickable = true; isFocusable = true
+                setOnClickListener { selectedSeverity = key; refreshSeverity() }
+            }
+            severityButtons[key] = view
+            severityRow.addView(view, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4); marginStart = dp(4) })
+        }
+        content.addView(severityRow)
+        refreshSeverity()
+        gap(10)
+        var dueDate = LocalDate.now().plusDays(7)
+        lateinit var dueButton: MaterialButton
+        dueButton = secondaryButton("مهلت اصلاح: ${deficiencyDateLabel(dueDate.toString())}") {
+            val picker = DatePickerDialog(this, { _, year, month, day ->
+                dueDate = LocalDate.of(year, month + 1, day)
+                dueButton.text = "مهلت اصلاح: ${deficiencyDateLabel(dueDate.toString())}"
+            }, dueDate.year, dueDate.monthValue - 1, dueDate.dayOfMonth)
+            picker.datePicker.minDate = System.currentTimeMillis() - 1000L
+            picker.show()
+        }
+        label("مستندات موجود برای این شاخص به نقص مرتبط می‌شوند؛ برای افزودن عکس یا PDF از فرم بازرسی استفاده کنید.", 10, false, muted)
+        button("ذخیره امن نقص") {
+            val cleanDescription = descriptionInput.text?.toString().orEmpty().trim()
+            val validation = DeficiencyWorkflowRules.validateDescription(cleanDescription)
+            if (validation != null) { notifyShort(validation); return@button }
+            if (dueDate.isBefore(LocalDate.now())) { notifyShort("مهلت اصلاح نمی‌تواند قبل از امروز باشد"); return@button }
+            val draft = runCatching { InspectionDraft(missionKey(mission), store) }.getOrNull()
+            val linkedEvidence = if (draft != null && !draft.integrityError) EvidenceRefs.references(draft.attachments, questionId) else emptyList()
+            val questions = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions") ?: JSONArray()
+            val question = questions.optJSONObject(questionIndex)
+            val sectionId = question?.optString("sectionId", "").orEmpty()
+            val organizationId = mission.optString("orgId", mission.optString("org_id", mission.optString("organizationId", "")))
+            val dueJalali = PersianCalendar.fromGregorian(dueDate)
+            try {
+                val record = deficiencies.create(
+                    missionKey(mission), organizationId, mission.optString("orgName", "دستگاه اجرایی"), questionId,
+                    questionIndex, sectionId, questionTitle, cleanDescription, selectedSeverity, dueDate.toString(), dueJalali,
+                    deficiencyActor(), serverSnapshot.optJSONObject("profile")?.optString("inspector_ref", "").orEmpty(), linkedEvidence
+                )
+                showDeficiencyDetail(record)
+                sessionToken?.let { activeSession ->
+                    val recordId = record.optString("id")
+                    work({ syncOneDeficiency(record, activeSession); deficiencies.get(recordId) ?: record }) { synced ->
+                        if (activeTab == "deficiency_detail" && selectedDeficiencyId == recordId) showDeficiencyDetail(synced)
+                        notifyShort("نقص در سرور ثبت و رسید همگام‌سازی دریافت شد")
+                    }
+                }
+            } catch (error: Exception) {
+                AppDiagnostics.record(this, "deficiency_create", error)
+                notifyShort(error.message?.take(160) ?: "ذخیره نقص انجام نشد")
+            }
+        }
+        secondaryButton("انصراف و بازگشت") {
+            showMission(mission, questionIndex)
+        }
+    }
+
+    private fun openRemoteDeficiencyEvidence(uploadId: Int) {
+        val bearer = sessionToken
+        if (bearer.isNullOrBlank()) { notifyShort("برای دریافت مستند از سرور ابتدا همگام‌سازی کنید"); return }
+        work({ api.downloadInspectorEvidence(uploadId, bearer) }) { (bytes, mime) ->
+            try {
+                val ext = when {
+                    mime == "application/pdf" -> "pdf"
+                    mime == "image/jpeg" -> "jpg"
+                    mime == "image/png" -> "png"
+                    mime == "image/webp" -> "webp"
+                    else -> "bin"
+                }
+                val dir = File(cacheDir, "deficiency_evidence").apply { mkdirs() }
+                val file = File(dir, "finding-$uploadId.$ext")
+                file.writeBytes(bytes)
+                val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                if (intent.resolveActivity(packageManager) != null) startActivity(intent)
+                else notifyShort("برای نمایش این نوع فایل، برنامه سازگار نصب نیست")
+            } catch (error: Exception) {
+                AppDiagnostics.record(this, "deficiency_evidence_open", error)
+                notifyShort("بازکردن مستند انجام نشد")
+            }
+        }
+    }
+
+    /** The mobile finding API only permits the originating inspector to change a finding. */
+    private fun canManageDeficiency(record: JSONObject): Boolean {
+        if (record.optBoolean("integrity_error")) return false
+        val currentRef = serverSnapshot.optJSONObject("profile")?.optString("inspector_ref", "").orEmpty()
+        val recordRef = record.optString("inspector_ref").ifBlank { record.optString("inspectorRef") }
+        return DeficiencyWorkflowRules.canInspectorManage(record.optString("source"), recordRef, currentRef)
+    }
+
+    private fun showDeficiencyDetail(record: JSONObject) {
+        if (record.optBoolean("integrity_error")) {
+            AlertDialog.Builder(this).setTitle("رکورد فقط‌خواندنی")
+                .setMessage("این رکورد رمزنگاری‌شده قابل بازیابی نیست. اطلاعات اصلی حذف نشده و امکان ویرایش آن متوقف شده است.")
+                .setPositiveButton("متوجه شدم", null).show()
+            return
+        }
+        activeTab = "deficiency_detail"
+        selectedDeficiencyId = record.optString("id")
+        screen("جزئیات نقص", record.optString("organization", "دستگاه اجرایی"))
+        val severity = record.optString("severity")
+        val status = record.optString("status")
+        val canManage = canManageDeficiency(record)
+        val overdue = DeficiencyWorkflowRules.isOverdue(record.optString("due_date_jalali", record.optString("due_date")), status)
+        val header = MaterialCardView(this).apply { radius = dp(17).toFloat(); strokeWidth = dp(1); strokeColor = gold; cardElevation = dp(1).toFloat(); setCardBackgroundColor(navy) }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
+        body.addView(text(record.optString("organization", "دستگاه اجرایی"), 16, true, Color.WHITE))
+        body.addView(text("شاخص ${faDigits((record.optInt("question_index") + 1).toString())} · ${record.optString("question_title")}", 11, false, Color.rgb(221, 231, 242)).apply { setPadding(0, dp(5), 0, dp(10)) })
+        body.addView(chip("${DeficiencyWorkflowRules.severityLabel(severity)} · ${DeficiencyWorkflowRules.statusLabel(status)}", Color.argb(35, 255, 255, 255), Color.rgb(248, 215, 151)))
+        header.addView(body)
+        content.addView(header)
+        gap(11)
+        val description = MaterialCardView(this).apply { radius = dp(15).toFloat(); strokeWidth = dp(1); strokeColor = line; cardElevation = 0f; setCardBackgroundColor(Color.WHITE) }
+        val descBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(13), dp(14), dp(13)) }
+        descBody.addView(text("شرح نقص", 12, true, muted))
+        descBody.addView(text(record.optString("description"), 14, false, ink).apply { setPadding(0, dp(6), 0, dp(10)) })
+        descBody.addView(text("مهلت اصلاح: ${deficiencyDateLabel(record.optString("due_date_jalali", record.optString("due_date")))}", 11, true, if (overdue) Color.rgb(165, 55, 45) else navy))
+        descBody.addView(text("مستندات مرتبط در شاخص: ${faDigits(record.optInt("linked_evidence_count").toString())}", 10, false, muted).apply { setPadding(0, dp(4), 0, 0) })
+        val linkedRefs = record.optJSONArray("linked_evidence_refs") ?: JSONArray()
+        for (i in 0 until linkedRefs.length()) {
+            val reference = linkedRefs.optString(i)
+            if (reference.isBlank()) continue
+            val evidenceRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL; setPadding(0, dp(5), 0, 0) }
+            evidenceRow.addView(text("${faDigits((i + 1).toString())}. ${evidenceVault.metadata(reference)}", 10, false, ink), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            evidenceRow.addView(makeButton("مشاهده", false) { openAttachedEvidence(reference) }, LinearLayout.LayoutParams(dp(86), dp(38)))
+            descBody.addView(evidenceRow)
+        }
+        description.addView(descBody)
+        content.addView(description)
+        val serverEvidence = record.optJSONArray("server_evidence_files") ?: JSONArray()
+        if (serverEvidence.length() > 0) {
+            gap(9)
+            sectionTitle("مستندات ارسال‌شده به سرور")
+            for (i in 0 until serverEvidence.length()) {
+                val file = serverEvidence.optJSONObject(i) ?: continue
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL; background = rounded(Color.WHITE, 11); setPadding(dp(10), dp(7), dp(10), dp(7)) }
+                row.addView(text("${faDigits((i + 1).toString())}. ${file.optString("name", "مستند")}", 10, true, ink), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(makeButton("دریافت", false) { openRemoteDeficiencyEvidence(file.optInt("id")) }, LinearLayout.LayoutParams(dp(84), dp(38)))
+                content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            }
+        }
+        gap(10)
+        val syncState = record.optString("sync_state")
+        val syncLabel = when (syncState) {
+            "synced" -> "این نقص با شناسه ${record.optString("server_id")} در سرور ثبت و رسید آن دریافت شده است."
+            "failed" -> "آخرین همگام‌سازی ناموفق بوده است: ${record.optString("sync_error")}" 
+            "conflict" -> "نسخه این نقص در سرور و گوشی متفاوت است. برای جلوگیری از بازنویسی ناخواسته، ارسال متوقف شده است. یکی از دو نسخه را آگاهانه انتخاب کنید."
+            else -> "این رکورد به‌صورت رمزنگاری‌شده روی گوشی ذخیره شده و هنوز به سرور ارسال نشده است."
+        }
+        content.addView(text(syncLabel, 10, true, if (syncState == "synced") Color.rgb(35, 125, 80) else Color.rgb(150, 96, 31)).apply {
+            background = rounded(if (syncState == "synced") Color.rgb(231, 246, 237) else Color.rgb(250, 243, 226), 11)
+            setPadding(dp(11), dp(10), dp(11), dp(10))
+        })
+        if (!canManage) {
+            content.addView(text(
+                "این نقص برای مشاهده در مأموریت‌های شما همگام‌سازی شده است؛ تغییر وضعیت فقط توسط بازرس ثبت‌کننده و از طریق حساب مجاز او انجام می‌شود.",
+                10, true, Color.rgb(91, 104, 119)
+            ).apply {
+                background = rounded(Color.rgb(239, 243, 248), 11)
+                setPadding(dp(11), dp(10), dp(11), dp(10))
+            })
+        }
+        val correctiveActions = serverSnapshot.optJSONArray("corrective_actions") ?: JSONArray()
+        val relatedActions = (0 until correctiveActions.length()).mapNotNull { correctiveActions.optJSONObject(it) }
+            .filter { it.optString("findingId", it.optString("finding_id")) == record.optString("id") }
+        if (relatedActions.isNotEmpty()) {
+            gap(10)
+            sectionTitle("اقدامات اصلاحی اداره")
+            relatedActions.forEach { action ->
+                val actionCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rounded(Color.WHITE, 12); setPadding(dp(11), dp(9), dp(11), dp(9)) }
+                actionCard.addView(text(action.optString("action", action.optString("title", "اقدام اصلاحی")), 11, true, navy))
+                actionCard.addView(text("مسئول: ${action.optString("responsible", "تعیین نشده")} · مهلت: ${action.optString("due", action.optString("dueDate", "—"))}", 10, false, muted).apply { setPadding(0, dp(4), 0, 0) })
+                val portalResponses = action.optJSONArray("portal_responses") ?: JSONArray()
+                if (portalResponses.length() > 0) {
+                    val latest = portalResponses.optJSONObject(0)
+                    if (latest != null) actionCard.addView(text("پاسخ اداره: ${latest.optString("response_text", "")}", 10, false, ink).apply { setPadding(0, dp(4), 0, 0) })
+                    if (latest != null) actionCard.addView(text("وضعیت پاسخ: ${latest.optString("status", "در انتظار بررسی")}", 9, true, muted).apply { setPadding(0, dp(3), 0, 0) })
+                }
+                val extensionRequests = action.optJSONArray("extension_requests") ?: JSONArray()
+                if (extensionRequests.length() > 0) {
+                    val extension = extensionRequests.optJSONObject(0)
+                    if (extension != null) actionCard.addView(text("درخواست تمدید تا ${extension.optString("requested_due", "—")} · ${extension.optString("status", "در انتظار بررسی")}", 9, true, Color.rgb(150, 96, 31)).apply { setPadding(0, dp(3), 0, 0) })
+                }
+                content.addView(actionCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(7) })
+            }
+        }
+        gap(12)
+        sectionTitle("تاریخچه تغییر وضعیت")
+        val events = record.optJSONArray("events") ?: JSONArray()
+        for (i in events.length() - 1 downTo 0) {
+            val event = events.optJSONObject(i) ?: continue
+            val eventCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rounded(Color.WHITE, 12); setPadding(dp(11), dp(9), dp(11), dp(9)) }
+            val from = event.optString("from_status")
+            val to = event.optString("to_status")
+            val title = if (from.isBlank()) "ثبت اولیه نقص" else "${DeficiencyWorkflowRules.statusLabel(from)} ← ${DeficiencyWorkflowRules.statusLabel(to)}"
+            eventCard.addView(text(title, 11, true, navy))
+            eventCard.addView(text("${event.optString("actor", "بازرس")} · ${formatLocalTimestamp(event.optString("at"))}", 9, false, muted).apply { setPadding(0, dp(3), 0, dp(3)) })
+            if (event.optString("note").isNotBlank()) eventCard.addView(text(event.optString("note"), 10, false, ink))
+            content.addView(eventCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(7) })
+        }
+        if (syncState == "conflict" && canManage) {
+            button("پذیرش نسخه آخر سرور") {
+                try { showDeficiencyDetail(deficiencies.resolveConflictUseServer(record.optString("id"))) }
+                catch (error: Exception) { notifyShort(error.message ?: "بازیابی نسخه سرور انجام نشد") }
+            }
+            secondaryButton("حفظ تغییرات گوشی و ارسال مجدد") {
+                try {
+                    val local = deficiencies.resolveConflictKeepLocal(record.optString("id"))
+                    showDeficiencyDetail(local)
+                    sessionToken?.let { activeSession ->
+                        work({ syncOneDeficiency(local, activeSession); deficiencies.get(local.optString("id")) ?: local }) { synced ->
+                            if (activeTab == "deficiency_detail" && selectedDeficiencyId == synced.optString("id")) showDeficiencyDetail(synced)
+                            notifyShort("تغییرات دستگاه با نسخه جدید سرور ثبت شد")
+                        }
+                    } ?: notifyShort("تغییرات روی دستگاه نگهداری شد؛ پس از ورود همگام‌سازی کنید")
+                } catch (error: Exception) { notifyShort(error.message ?: "حل تعارض انجام نشد") }
+            }
+        }
+        val next = when (status) {
+            DeficiencyWorkflowRules.OPEN -> listOf(DeficiencyWorkflowRules.IN_PROGRESS)
+            DeficiencyWorkflowRules.IN_PROGRESS -> listOf(DeficiencyWorkflowRules.AWAITING_VERIFICATION)
+            DeficiencyWorkflowRules.REJECTED -> listOf(DeficiencyWorkflowRules.IN_PROGRESS)
+            else -> emptyList()
+        }
+        if (canManage && syncState in setOf("local_pending", "failed")) {
+            secondaryButton(if (syncState == "failed") "تلاش مجدد برای همگام‌سازی نقص" else "همگام‌سازی نقص با سامانه") {
+                val bearer = sessionToken
+                if (bearer.isNullOrBlank()) notifyShort("ابتدا وارد حساب بازرس شوید")
+                else if (!online()) notifyShort("اتصال اینترنت برقرار نیست؛ اطلاعات روی گوشی حفظ شده است")
+                else if (busy) notifyShort("عملیات دیگری در حال انجام است؛ کمی صبر کنید")
+                else work({ syncOneDeficiency(record, bearer); deficiencies.get(record.optString("id")) ?: record }) { synced ->
+                    if (activeTab == "deficiency_detail" && selectedDeficiencyId == synced.optString("id")) showDeficiencyDetail(synced)
+                    notifyShort("نقص با موفقیت همگام‌سازی شد")
+                }
+            }
+        }
+        if (canManage && syncState == "synced" && next.isNotEmpty()) {
+            button("ثبت اقدام / تغییر وضعیت") { chooseDeficiencyStatus(record, next) }
+        }
+        secondaryButton("بازکردن شاخص مرتبط") {
+            val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
+            val mission = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }
+                .firstOrNull { missionKey(it) == record.optString("mission_key") }
+            if (mission != null) showMission(mission, record.optInt("question_index"))
+            else notifyShort("مأموریت در حافظه فعلی نیست؛ ابتدا همگام‌سازی کنید")
+        }
+        secondaryButton("بازگشت به فهرست نواقص") { showHome("deficiencies") }
+    }
+
+    private fun chooseDeficiencyStatus(record: JSONObject, options: List<String>) {
+        if (!canManageDeficiency(record)) { notifyShort("این نقص فقط‌خواندنی است"); return }
+        if (record.optString("sync_state") != "synced") { notifyShort("ابتدا نقص را با سرور همگام‌سازی کنید"); return }
+        if (sessionToken.isNullOrBlank()) { notifyShort("نشست امن بازرس منقضی شده است؛ دوباره همگام‌سازی کنید"); return }
+        if (!online()) { notifyShort("برای ثبت تغییر وضعیت، اتصال اینترنت لازم است؛ وضعیت قبلی حفظ شد"); return }
+        if (busy) { notifyShort("عملیات دیگری در حال انجام است؛ کمی صبر کنید"); return }
+        val labels = options.map { DeficiencyWorkflowRules.statusLabel(it) }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("انتخاب وضعیت بعدی")
+            .setItems(labels) { _, index ->
+                val nextStatus = options[index]
+                val noteInput = EditText(this).apply {
+                    hint = if (DeficiencyWorkflowRules.requiresActionNote(nextStatus)) "شرح اقدام یا نتیجه بازدید مجدد (حداقل ۸ نویسه)" else "توضیح اقدام (اختیاری)"
+                    textSize = 14f; setTextColor(ink); setHintTextColor(muted)
+                    gravity = Gravity.RIGHT or Gravity.TOP
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                    minLines = 3; maxLines = 5
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                }
+                val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0); addView(noteInput) }
+                AlertDialog.Builder(this).setTitle("توضیح اقدام")
+                    .setView(wrap)
+                    .setNegativeButton("انصراف", null)
+                    .setPositiveButton("ثبت تغییر") { _, _ ->
+                        try {
+                            val updated = deficiencies.changeStatus(record.optString("id"), nextStatus, noteInput.text?.toString().orEmpty(), deficiencyActor())
+                            showDeficiencyDetail(updated)
+                            sessionToken?.let { activeSession ->
+                                work({ syncOneDeficiency(updated, activeSession); deficiencies.get(updated.optString("id")) ?: updated }) { synced ->
+                                    if (activeTab == "deficiency_detail" && selectedDeficiencyId == synced.optString("id")) showDeficiencyDetail(synced)
+                                    notifyShort("تغییر وضعیت نقص در سرور ثبت شد")
+                                }
+                            }
+                        } catch (error: Exception) {
+                            AppDiagnostics.record(this, "deficiency_status_change", error)
+                            notifyShort(error.message?.take(180) ?: "تغییر وضعیت ثبت نشد")
+                        }
+                    }.show()
+            }
+            .setNegativeButton("انصراف", null).show()
     }
 
     /** Full checklist map: jump to any section or directly to its first incomplete item. */
@@ -3804,7 +4445,12 @@ class MainActivity : AppCompatActivity() {
                 store.saveDurable("receipt:$key", response.toString())
                 // A local history write failure must not turn a server-confirmed success into a retry.
                 runCatching { receiptHistory.save(mission, draft, response) }
-                EvidenceRefs.all(draft.attachments).forEach { evidenceVault.delete(it) }
+                EvidenceRefs.all(draft.attachments).forEach { reference ->
+                    // Keep evidence that is still referenced by an independently tracked deficiency.
+                    if (!runCatching { deficiencies.isEvidenceReferenced(reference) }.getOrDefault(true)) {
+                        evidenceVault.delete(reference)
+                    }
+                }
                 draft.clear()
                 outbox.remove(key)
                 signatures.clear(key)
