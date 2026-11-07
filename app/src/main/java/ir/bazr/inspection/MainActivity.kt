@@ -1387,7 +1387,66 @@ class MainActivity : AppCompatActivity() {
         destination.addView(card, lp)
     }
 
+    /**
+     * Guard the drafts destination separately: a malformed local record must never
+     * terminate the whole Activity. The original encrypted records are left untouched.
+     */
     private fun showHome(tab: String = "home") {
+        try {
+            renderHome(tab)
+        } catch (error: Exception) {
+            if (tab != "drafts") throw error
+            AppDiagnostics.record(this, "open_drafts", error)
+            showDraftsRecoveryScreen(error)
+        }
+    }
+
+    private fun showDraftsRecoveryScreen(error: Exception) {
+        activeTab = "drafts"
+        selectedMission = null
+        openDraft = null
+        try {
+            val root = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                setPadding(dp(22), dp(28), dp(22), dp(24))
+                setBackgroundColor(pageBg)
+            }
+            root.addView(text("پیش‌نویس‌ها موقتاً باز نشدند", 20, true, navy))
+            root.addView(text(
+                "اطلاعات ذخیره‌شده حذف نشده است. برنامه برای جلوگیری از آسیب به پیش‌نویس‌ها، نمایش این صفحه را متوقف کرد.",
+                14, false, muted
+            ).apply { setPadding(0, dp(12), 0, dp(18)) })
+            root.addView(text(
+                "کد خطا: ${error.javaClass.simpleName}",
+                12, true, Color.rgb(153, 75, 35)
+            ).apply { setPadding(0, 0, 0, dp(16)) })
+            val retry = makeButton("تلاش دوباره", true) { showHome("drafts") }
+            root.addView(retry, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+                bottomMargin = dp(10)
+            })
+            val share = makeButton("ارسال گزارش فنی خطا", false) {
+                val report = AppDiagnostics.read(this)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "گزارش خطای پیش‌نویس‌های سامانه بازرسی")
+                    putExtra(Intent.EXTRA_TEXT, report)
+                }
+                runCatching { startActivity(Intent.createChooser(send, "ارسال گزارش خطا")) }
+                    .onFailure { notifyShort("امکان بازکردن برنامه اشتراک‌گذاری وجود ندارد") }
+            }
+            root.addView(share, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
+            root.addView(text(
+                "لطفاً داده‌های برنامه را پاک نکنید و برنامه را حذف نکنید.",
+                12, true, Color.rgb(153, 75, 35)
+            ).apply { setPadding(0, dp(20), 0, 0) })
+            setContentView(root)
+        } catch (_: Exception) {
+            notifyShort("پیش‌نویس‌ها باز نشدند؛ اطلاعات ذخیره‌شده پاک نشده‌اند. گزارش خطا در برنامه ثبت شد.")
+        }
+    }
+
+    private fun renderHome(tab: String) {
         selectedMission = null
         openDraft = null
         activeTab = tab
@@ -1576,7 +1635,6 @@ class MainActivity : AppCompatActivity() {
                 search.setSingleLine(true)
                 search.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
                 search.compoundDrawablePadding = dp(8)
-                content.addView(search)
                 gap(8)
                 val count = text("", 12, false, muted)
                 content.addView(count)
@@ -1622,7 +1680,6 @@ class MainActivity : AppCompatActivity() {
                 draftSearch.setSingleLine(true)
                 draftSearch.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
                 draftSearch.compoundDrawablePadding = dp(8)
-                content.addView(draftSearch)
                 gap(7)
                 val draftCount = text("", 11, false, muted)
                 val draftHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1642,26 +1699,45 @@ class MainActivity : AppCompatActivity() {
                             gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
                         })
                     } else filtered.forEach { mission ->
-                        val key = missionKey(mission)
-                        val pending = outbox.get(key)
-                        val draft = InspectionDraft(key, store)
-                        val status = when {
-                            draft.integrityError -> "خطای بازیابی امن · بازنویسی متوقف شده است"
-                            pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
-                            pending != null -> "امضاشده · آماده ارسال"
-                            draft.validate(mission).isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
-                            draft.unscoredIds(mission).isNotEmpty() -> "پیش‌نویس با ${draft.unscoredIds(mission).size} بند بی‌امتیاز"
-                            else -> "آماده مرور و امضا"
+                        try {
+                            val key = missionKey(mission)
+                            val pending = outbox.get(key)
+                            val draft = InspectionDraft(key, store)
+                            val unscored = runCatching { draft.unscoredIds(mission) }.getOrDefault(emptyList())
+                            val issues = runCatching { draft.validate(mission) }.getOrDefault(listOf("نیازمند بررسی ساختار مأموریت"))
+                            val status = when {
+                                draft.integrityError -> "خطای بازیابی امن · بازنویسی متوقف شده است"
+                                pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
+                                pending != null -> "امضاشده · آماده ارسال"
+                                issues.isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
+                                unscored.isNotEmpty() -> "پیش‌نویس با ${unscored.size} بند بی‌امتیاز"
+                                else -> "آماده مرور و امضا"
+                            }
+                            draftHost.addView(text("وضعیت: $status", 11, false, if (pending != null) teal else muted).apply {
+                                setPadding(dp(4), dp(5), dp(4), dp(2))
+                            })
+                            missionItem(mission, draftHost)
+                        } catch (error: Exception) {
+                            AppDiagnostics.record(this, "render_draft_item", error)
+                            draftHost.addView(text(
+                                "یکی از پیش‌نویس‌ها قابل نمایش نیست؛ اطلاعات آن حفظ شده و برای بررسی علامت‌گذاری شد.",
+                                12, false, Color.rgb(153, 75, 35)
+                            ).apply {
+                                setPadding(dp(12), dp(12), dp(12), dp(12))
+                                background = rounded(Color.rgb(255, 246, 235), 12)
+                            })
                         }
-                        draftHost.addView(text("وضعیت: $status", 11, false, if (pending != null) teal else muted).apply {
-                            setPadding(dp(4), dp(5), dp(4), dp(2))
-                        })
-                        missionItem(mission, draftHost)
                     }
                 }
                 draftSearch.addTextChangedListener(object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderDrafts()
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        try { renderDrafts() }
+                        catch (error: Exception) {
+                            AppDiagnostics.record(this@MainActivity, "filter_drafts", error)
+                            showDraftsRecoveryScreen(error)
+                        }
+                    }
                     override fun afterTextChanged(s: Editable?) {}
                 })
                 renderDrafts()

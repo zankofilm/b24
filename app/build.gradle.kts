@@ -20,8 +20,8 @@ android {
         applicationId = "ir.bazr.inspection"
         minSdk = 30
         targetSdk = 35
-        versionCode = 27
-        versionName = "4.14.2"
+        versionCode = 28
+        versionName = "4.14.3"
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
     signingConfigs {

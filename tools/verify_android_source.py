@@ -52,6 +52,26 @@ if re.search(r"\.entries\s*\.takeLast\s*\(", main_activity):
 if "entries.toList().takeLast(limit)" not in main_activity:
     errors.append("Trend chart should select its tail from a List using entries.toList().takeLast(limit)")
 
+# field() adds its TextInputEditText inside a TextInputLayout to `content`.
+# Re-adding the returned EditText directly causes IllegalStateException at runtime.
+main_lines = main_activity.splitlines()
+for index, line in enumerate(main_lines):
+    match = re.search(r"val\s+(\w+)\s*=\s*field\(", line)
+    if not match:
+        continue
+    field_name = match.group(1)
+    for later in main_lines[index + 1:index + 24]:
+        if re.search(r"content\.addView\(" + re.escape(field_name) + r"\)", later):
+            errors.append(
+                f"Duplicate parent attachment for field '{field_name}': field() already attaches its wrapper"
+            )
+
+diagnostics = MAIN / "java" / "ir" / "bazr" / "inspection" / "AppDiagnostics.kt"
+if not diagnostics.is_file():
+    errors.append("Missing on-device diagnostics helper: AppDiagnostics.kt")
+if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostics.record(this, \"open_drafts\"" not in main_activity:
+    errors.append("Drafts screen must have a recoverable error boundary and diagnostic capture")
+
 # Required visual assets used by the approved login/dashboard design.
 for name in ("login_building.webp", "iran_flag_ribbon.webp"):
     if not (MAIN / "res" / "drawable-nodpi" / name).is_file():
