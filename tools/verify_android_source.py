@@ -55,22 +55,46 @@ if "entries.toList().takeLast(limit)" not in main_activity:
 # field() adds its TextInputEditText inside a TextInputLayout to `content`.
 # Re-adding the returned EditText directly causes IllegalStateException at runtime.
 main_lines = main_activity.splitlines()
-for index, line in enumerate(main_lines):
-    match = re.search(r"val\s+(\w+)\s*=\s*field\(", line)
-    if not match:
-        continue
-    field_name = match.group(1)
-    for later in main_lines[index + 1:index + 24]:
-        if re.search(r"content\.addView\(" + re.escape(field_name) + r"\)", later):
-            errors.append(
-                f"Duplicate parent attachment for field '{field_name}': field() already attaches its wrapper"
-            )
+field_names = {
+    match.group(1)
+    for line in main_lines
+    if (match := re.search(r"val\s+(\w+)\s*=\s*field\(", line))
+}
+for field_name in sorted(field_names):
+    if re.search(r"content\.addView\(\s*" + re.escape(field_name) + r"\s*\)", main_activity):
+        errors.append(
+            f"Duplicate parent attachment for field '{field_name}': field() already attaches its wrapper"
+        )
 
 diagnostics = MAIN / "java" / "ir" / "bazr" / "inspection" / "AppDiagnostics.kt"
 if not diagnostics.is_file():
     errors.append("Missing on-device diagnostics helper: AppDiagnostics.kt")
 if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostics.record(this, \"open_drafts\"" not in main_activity:
     errors.append("Drafts screen must have a recoverable error boundary and diagnostic capture")
+
+
+# Version 4.15 UI and draft workflow regression guards.
+if 'versionName = "4.15.0"' not in gradle_file or 'versionCode = 29' not in gradle_file:
+    errors.append("Expected BAZR Android 4.15.0 / versionCode 29")
+for required in (
+    'var renderDraftCards: () -> Unit = {}',
+    '"در حال تکمیل"',
+    '"آماده ارسال"',
+    '"نیازمند پیگیری"',
+    'پیشرفت بازرسی',
+    'مشاهده صف ارسال',
+    'ارسال گروهی گزارش‌های سالم',
+    'private fun formatLocalTimestamp',
+):
+    if required not in main_activity:
+        errors.append(f"Missing 4.15 draft workflow/UI element: {required}")
+if 'Color.WHITE' not in main_activity[main_activity.find('private fun bottomNavigation()'):main_activity.find('private fun statCard(')]:
+    errors.append("Version 4.15 bottom navigation should use the approved light surface")
+inspection_draft = (MAIN / "java" / "ir" / "bazr" / "inspection" / "InspectionDraft.kt").read_text(encoding="utf-8")
+if 'updatedAt = j.optString("updated_at", startedAt)' not in inspection_draft:
+    errors.append("Draft timestamp migration must remain backward-compatible")
+if '.put("updated_at", updatedAt)' not in inspection_draft:
+    errors.append("Draft save should persist the last local update timestamp")
 
 # Required visual assets used by the approved login/dashboard design.
 for name in ("login_building.webp", "iran_flag_ribbon.webp"):
@@ -88,3 +112,6 @@ print(f" - XML files parsed: {len(xml_files)}")
 print(f" - Drawable references verified: {len(referenced)}")
 print(" - GitHub artifact version synchronized")
 print(" - Required login design assets present")
+print(" - 4.15 draft filters, progress and queue guards verified")
+print(" - Backward-compatible local draft timestamp verified")
+print(" - Duplicate TextInput parent attachment guard enabled")

@@ -11,6 +11,8 @@ class InspectionDraft(val key: String, private val store: SecureStore) {
     var notes: JSONObject = JSONObject()
     var attachments: JSONObject = JSONObject() // question -> legacy String or JSON array of encrypted evidence refs
     var startedAt: String = Instant.now().toString()
+    /** Local last-save timestamp; older records fall back to started_at without migration loss. */
+    var updatedAt: String = startedAt
     // Explicit, per-version acknowledgement of omitted scores. Stored encrypted.
     var acknowledgedUnscored: JSONArray = JSONArray()
     var acknowledgedAt: String = ""
@@ -29,6 +31,7 @@ class InspectionDraft(val key: String, private val store: SecureStore) {
                 notes = j.optJSONObject("notes") ?: JSONObject()
                 attachments = j.optJSONObject("attachments") ?: JSONObject()
                 startedAt = j.optString("started_at", startedAt)
+                updatedAt = j.optString("updated_at", startedAt)
                 acknowledgedUnscored = j.optJSONArray("acknowledged_unscored_ids") ?: JSONArray()
                 acknowledgedAt = j.optString("acknowledged_at", "")
                 submissionKey = j.optString("submission_key").takeIf { it.isNotBlank() } ?: submissionKey
@@ -40,8 +43,10 @@ class InspectionDraft(val key: String, private val store: SecureStore) {
 
     fun save() {
         if (integrityError) throw java.io.IOException("پیش‌نویس رمزنگاری‌شده قابل بازیابی نیست؛ از بازنویسی آن جلوگیری شد")
+        updatedAt = Instant.now().toString()
         val j = JSONObject().put("answers", answers).put("notes", notes)
             .put("attachments", attachments).put("started_at", startedAt)
+            .put("updated_at", updatedAt)
             .put("submission_key", submissionKey)
             .put("acknowledged_unscored_ids", acknowledgedUnscored)
             .put("acknowledged_at", acknowledgedAt)

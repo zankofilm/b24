@@ -419,7 +419,7 @@ class MainActivity : AppCompatActivity() {
         val backPages = setOf(
             "مأموریت‌های من", "فرم بازرسی", "ثبت بازرسی", "بازبینی گزارش", "مرور گزارش",
             "پیش‌نویس‌های من", "گزارش‌ها و تحلیل‌ها", "گزارش رسمی", "سوابق بازرسی",
-            "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "کارتابل سربازرس",
+            "جزئیات گزارش", "ادارات مجاز من", "صف ارسال گزارش‌ها", "ارسال گزارش‌ها", "کارتابل سربازرس",
             "بررسی گزارش بازرس", "تأیید دستگاه", "اطلاعیه‌های سازمانی", "تأیید هویت"
         )
         val showBack = pageTitle in backPages
@@ -693,29 +693,32 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(row)
     }
-    /** Five primary destinations from the approved 4.14 visual reference; extra roles stay in the role menu. */
+    /** Version 4.15 light bottom navigation: navy active capsule, gold active glyph. */
     private fun bottomNavigation(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setBackgroundColor(navy)
-            setPadding(dp(5), dp(5), dp(5), dp(5))
-            elevation = dp(8).toFloat()
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(6), dp(5), dp(6), dp(5))
+            elevation = dp(9).toFloat()
         }
         val items = listOf(
             Triple("home", "خانه", R.drawable.ic_home),
-            Triple("missions", "مأموریت‌ها", R.drawable.ic_clipboard),
+            Triple("missions", "بازرسی", R.drawable.ic_clipboard),
             Triple("drafts", "پیش‌نویس‌ها", R.drawable.ic_notes),
             Triple("analytics", "گزارش‌ها", R.drawable.ic_chart),
-            Triple("account", "حساب", R.drawable.ic_person)
+            Triple("account", "بیشتر", R.drawable.ic_person)
         )
         for ((id, caption, drawable) in items) {
-            val chosen = activeTab == id || (id == "analytics" && activeTab in setOf("official_reports", "history"))
+            val chosen = activeTab == id ||
+                (id == "drafts" && activeTab == "outbox") ||
+                (id == "analytics" && activeTab in setOf("official_reports", "history")) ||
+                (id == "account" && activeTab in setOf("notices", "departments", "supervisor"))
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                setPadding(dp(1), dp(2), dp(1), dp(2))
+                setPadding(dp(2), dp(2), dp(2), dp(2))
                 isClickable = true
                 isFocusable = true
                 contentDescription = caption
@@ -729,19 +732,23 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val iconHolder = FrameLayout(this).apply {
-                background = if (chosen) rounded(gold, 12) else rounded(Color.TRANSPARENT, 12)
-                addView(icon(drawable, if (chosen) navy else Color.WHITE, 22),
+                background = if (chosen) rounded(navy, 11) else rounded(Color.TRANSPARENT, 11)
+                addView(icon(drawable, if (chosen) gold else navy, 22),
                     FrameLayout.LayoutParams(dp(25), dp(25), Gravity.CENTER))
             }
-            item.addView(iconHolder, LinearLayout.LayoutParams(dp(44), dp(34)))
-            val captionView = text(caption, 9, chosen, if (chosen) gold else Color.rgb(226, 233, 241))
+            item.addView(iconHolder, LinearLayout.LayoutParams(dp(43), dp(34)))
+            val captionView = text(caption, 9, chosen, if (chosen) navy else muted)
             captionView.gravity = Gravity.CENTER
             captionView.maxLines = 1
+            captionView.setPadding(0, dp(2), 0, 0)
             item.addView(captionView)
-            bar.addView(item, LinearLayout.LayoutParams(0, dp(59), 1f))
+            bar.addView(item, LinearLayout.LayoutParams(0, dp(58), 1f))
         }
-        val divider = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(navy) }
-        divider.addView(View(this).apply { setBackgroundColor(Color.rgb(29, 62, 92)) },
+        val divider = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+        divider.addView(View(this).apply { setBackgroundColor(line) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         divider.addView(bar)
         return divider
@@ -1201,6 +1208,22 @@ class MainActivity : AppCompatActivity() {
         }
         info.addView(text(name, 14, true, navy).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
         info.addView(text(date.ifBlank { "تاریخ ابلاغ ثبت نشده" }, 10, false, muted).apply { setPadding(0, dp(4), 0, 0) })
+        if (isDraft) {
+            val (answered, total) = answeredQuestions(mission)
+            if (total > 0) {
+                info.addView(text("${faDigits(answered.toString())} از ${faDigits(total.toString())} شاخص تکمیل‌شده", 9, true, teal).apply {
+                    setPadding(0, dp(5), 0, dp(3))
+                })
+                val progress = LinearProgressIndicator(this).apply {
+                    isIndeterminate = false
+                    max = total
+                    setProgressCompat(answered, false)
+                    trackColor = Color.rgb(235, 239, 244)
+                    setIndicatorColor(gold)
+                }
+                info.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)))
+            }
+        }
         row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(chip(status, statusBg, statusFg).apply {
             textSize = 9f
@@ -1220,6 +1243,15 @@ class MainActivity : AppCompatActivity() {
             val time = Instant.parse(raw).atZone(ZoneId.systemDefault())
             "آخرین همگام‌سازی: " + DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm", Locale("fa")).format(time)
         } catch (_: Exception) { "اطلاعات آخرین همگام‌سازی ثبت شده است" }
+    }
+
+    /** Persian local timestamp for local draft metadata; never used as server authority. */
+    private fun formatLocalTimestamp(raw: String): String {
+        if (raw.isBlank()) return "زمان ذخیره ثبت نشده"
+        return try {
+            DateTimeFormatter.ofPattern("yyyy/MM/dd · HH:mm", Locale("fa"))
+                .format(Instant.parse(raw).atZone(ZoneId.systemDefault()))
+        } catch (_: Exception) { "زمان ذخیره ثبت شده" }
     }
 
     /** Manual-sync-only notification. No push service or background polling is implied. */
@@ -1499,13 +1531,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 gap(13)
                 sectionTitle("خلاصه عملکرد", "نمای کلی") { showHome("missions") }
+                val authorizedCount = serverSnapshot.optJSONArray("authorized_organizations")?.length() ?: 0
                 statsRow(
-                    statCard(faDigits(all.size.toString()), "کل مأموریت‌ها", R.drawable.ic_clipboard, Color.rgb(234, 241, 249), navy),
-                    statCard(faDigits(available.size.toString()), "قابل انجام", R.drawable.ic_check, Color.rgb(232, 245, 238), Color.rgb(38, 126, 86))
+                    statCard(faDigits(all.size.toString()), "مأموریت‌ها", R.drawable.ic_clipboard, Color.rgb(234, 241, 249), navy),
+                    statCard(faDigits(drafted.size.toString()), "پیش‌نویس‌ها", R.drawable.ic_notes, Color.rgb(242, 237, 249), Color.rgb(112, 83, 154))
                 )
                 statsRow(
-                    statCard(faDigits(drafted.size.toString()), "پیش‌نویس‌ها", R.drawable.ic_notes, Color.rgb(242, 237, 249), Color.rgb(112, 83, 154)),
-                    statCard(faDigits(reportCount().toString()), "گزارش ارسال‌شده", R.drawable.ic_chart, Color.rgb(250, 243, 229), Color.rgb(163, 112, 42))
+                    statCard(faDigits(reportCount().toString()), "گزارش‌های ثبت‌شده", R.drawable.ic_chart, Color.rgb(232, 245, 238), Color.rgb(38, 126, 86)),
+                    statCard(faDigits(authorizedCount.toString()), "ادارات مجاز", R.drawable.ic_building, Color.rgb(250, 243, 229), Color.rgb(163, 112, 42))
                 )
                 gap(2)
                 goldButton("شروع بازرسی جدید  +") {
@@ -1668,81 +1701,293 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             "drafts" -> {
-                screen("پیش‌نویس‌های من", "کارهای ذخیره‌شده روی همین دستگاه",withNav=true)
-                label("${drafted.size} پیش‌نویس موجود",18,true,navy)
-                gap(6)
-                val ready = makeButton("ارسال همه گزارش‌های امضاشده (${queued.size})", true) { sendAllQueued() }
-                ready.setIconResource(R.drawable.ic_send_all)
-                content.addView(ready)
-                secondaryButton("نمایش صف ارسال و جزئیات خطاها") { showOutbox() }
+                screen("پیش‌نویس‌های من", "ذخیره امن، ادامه بازرسی و پیگیری ارسال", withNav = true)
+                val failedCount = queued.count { it.optString("state") == "failed" || it.optBoolean("integrity_error") }
+                val uploadingCount = queued.count { it.optString("state") == "uploading" }
+                val activeDraftCount = drafted.count { mission ->
+                    val key = missionKey(mission)
+                    key.isNotBlank() && outbox.get(key) == null
+                }
+                val readyCount = queued.count { !it.optBoolean("integrity_error") }
+
+                val overview = MaterialCardView(this).apply {
+                    radius = dp(18).toFloat()
+                    strokeWidth = dp(1)
+                    strokeColor = line
+                    cardElevation = dp(1).toFloat()
+                    setCardBackgroundColor(Color.WHITE)
+                }
+                val overviewBody = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(15), dp(14), dp(15), dp(14))
+                }
+                overviewBody.addView(text("وضعیت کارهای ذخیره‌شده", 14, true, navy))
+                val overviewRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                    setPadding(0, dp(10), 0, 0)
+                }
+                fun miniMetric(value: Int, title: String, tone: Int, bg: Int) {
+                    val cell = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        gravity = Gravity.CENTER
+                        background = rounded(bg, 12)
+                        setPadding(dp(5), dp(9), dp(5), dp(9))
+                    }
+                    cell.addView(text(faDigits(value.toString()), 20, true, tone).apply { gravity = Gravity.CENTER })
+                    cell.addView(text(title, 9, true, muted).apply { gravity = Gravity.CENTER })
+                    overviewRow.addView(cell, LinearLayout.LayoutParams(0, dp(61), 1f).apply {
+                        marginStart = dp(4); marginEnd = dp(4)
+                    })
+                }
+                miniMetric(activeDraftCount, "در حال تکمیل", navy, Color.rgb(239, 243, 248))
+                miniMetric(readyCount, "در صف ارسال", Color.rgb(29, 125, 82), Color.rgb(231, 246, 238))
+                miniMetric(failedCount, "نیازمند پیگیری", Color.rgb(169, 91, 47), Color.rgb(252, 241, 231))
+                overviewBody.addView(overviewRow)
+                overview.addView(overviewBody)
+                content.addView(overview)
                 gap(10)
+
+                val sendReady = makeButton("ارسال گروهی گزارش‌های آماده (${queued.size})", true) {
+                    if (queued.isEmpty()) notifyShort("گزارش امضاشده‌ای در صف ارسال وجود ندارد") else sendAllQueued()
+                }
+                sendReady.setIconResource(R.drawable.ic_send_all)
+                sendReady.iconTint = ColorStateList.valueOf(Color.WHITE)
+                sendReady.isEnabled = queued.any { !it.optBoolean("integrity_error") }
+                content.addView(sendReady)
+                secondaryButton("مشاهده جزئیات صف ارسال و تلاش مجدد") { showOutbox() }
+                gap(9)
+
                 val draftSearch = field("جست‌وجوی نام اداره یا مأموریت")
                 draftSearch.setSingleLine(true)
                 draftSearch.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_search, 0)
                 draftSearch.compoundDrawablePadding = dp(8)
-                gap(7)
-                val draftCount = text("", 11, false, muted)
-                val draftHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                content.addView(draftCount)
-                content.addView(draftHost)
-                fun renderDrafts() {
-                    val query = draftSearch.text?.toString()?.trim().orEmpty()
-                    val filtered = drafted.filter { mission ->
-                        query.isBlank() || mission.optString("orgName").contains(query, ignoreCase = true) ||
-                            mission.optString("date").contains(query, ignoreCase = true)
-                    }
-                    draftCount.text = "${filtered.size} پیش‌نویس نمایش داده می‌شود"
-                    draftHost.removeAllViews()
-                    if (filtered.isEmpty()) {
-                        val message = if (drafted.isEmpty()) "پیش‌نویسی ندارید؛ پاسخ‌های چک‌لیست به‌صورت خودکار ذخیره می‌شوند." else "پیش‌نویسی با این جست‌وجو پیدا نشد."
-                        draftHost.addView(text(message, 13, false, muted).apply {
-                            gravity = Gravity.CENTER; setPadding(dp(14), dp(26), dp(14), dp(26)); background = rounded(Color.WHITE, 14)
+                val filterRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutDirection = View.LAYOUT_DIRECTION_RTL
+                }
+                val resultHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                val resultCount = text("", 11, false, muted)
+                var selectedDraftFilter = "all"
+                val filterButtons = linkedMapOf<String, MaterialButton>()
+                var renderDraftCards: () -> Unit = {}
+                listOf("all" to "همه", "progress" to "در حال تکمیل", "ready" to "آماده ارسال", "attention" to "نیازمند پیگیری")
+                    .forEachIndexed { index, pair ->
+                        val (filterId, caption) = pair
+                        val filterButton = makeButton(caption, false) {
+                            selectedDraftFilter = filterId
+                            renderDraftCards()
+                        }.apply {
+                            textSize = 9f
+                            minHeight = dp(39)
+                            setPadding(dp(2), 0, dp(2), 0)
+                        }
+                        filterButtons[filterId] = filterButton
+                        filterRow.addView(filterButton, LinearLayout.LayoutParams(0, dp(41), 1f).apply {
+                            marginStart = if (index == 0) 0 else dp(4)
                         })
-                    } else filtered.forEach { mission ->
+                    }
+                // field() has already attached its TextInputLayout wrapper to content.
+                gap(8)
+                content.addView(filterRow)
+                gap(8)
+                content.addView(resultCount)
+                gap(7)
+                content.addView(resultHost)
+
+                renderDraftCards = {
+                    val query = draftSearch.text?.toString()?.trim().orEmpty()
+                    val models = drafted.mapNotNull { mission ->
                         try {
                             val key = missionKey(mission)
-                            val pending = outbox.get(key)
+                            if (key.isBlank()) return@mapNotNull null
                             val draft = InspectionDraft(key, store)
-                            val unscored = runCatching { draft.unscoredIds(mission) }.getOrDefault(emptyList())
-                            val issues = runCatching { draft.validate(mission) }.getOrDefault(listOf("نیازمند بررسی ساختار مأموریت"))
-                            val status = when {
-                                draft.integrityError -> "خطای بازیابی امن · بازنویسی متوقف شده است"
-                                pending?.optString("state") == "failed" -> "ارسال ناموفق · قابل تلاش مجدد"
-                                pending != null -> "امضاشده · آماده ارسال"
-                                issues.isNotEmpty() -> "نیازمند اصلاح امتیاز یا مستند"
-                                unscored.isNotEmpty() -> "پیش‌نویس با ${unscored.size} بند بی‌امتیاز"
-                                else -> "آماده مرور و امضا"
+                            val queuedRecord = outbox.get(key)
+                            val (answered, total) = answeredQuestions(mission)
+                            val unscored = if (draft.integrityError) emptyList() else runCatching { draft.unscoredIds(mission) }.getOrDefault(emptyList())
+                            val issues = if (draft.integrityError) listOf("خطای بازیابی امن") else runCatching { draft.validate(mission) }.getOrDefault(listOf("ساختار پیش‌نویس نیازمند بررسی است"))
+                            val failed = queuedRecord?.optString("state") == "failed" || queuedRecord?.optBoolean("integrity_error") == true
+                            val queuedNow = queuedRecord != null && !queuedRecord.optBoolean("integrity_error")
+                            val category = when {
+                                draft.integrityError || failed || issues.isNotEmpty() -> "attention"
+                                queuedNow -> "ready"
+                                else -> "progress"
                             }
-                            draftHost.addView(text("وضعیت: $status", 11, false, if (pending != null) teal else muted).apply {
-                                setPadding(dp(4), dp(5), dp(4), dp(2))
-                            })
-                            missionItem(mission, draftHost)
+                            val status = when (category) {
+                                "attention" -> if (draft.integrityError || queuedRecord?.optBoolean("integrity_error") == true) "خطای بازیابی · فقط‌خواندنی" else "نیازمند تکمیل یا اصلاح"
+                                "ready" -> "امضاشده · آماده ارسال"
+                                else -> "در حال تکمیل"
+                            }
+                            Triple(mission, JSONObject()
+                                .put("key", key)
+                                .put("answered", answered)
+                                .put("total", total)
+                                .put("unscored", unscored.size)
+                                .put("issues", issues.size)
+                                .put("category", category)
+                                .put("status", status)
+                                .put("queued", queuedNow)
+                                .put("failed", failed)
+                                .put("integrity", draft.integrityError || queuedRecord?.optBoolean("integrity_error") == true)
+                                .put("updated", draft.updatedAt)
+                                .put("attachments", EvidenceRefs.count(draft.attachments)), category)
                         } catch (error: Exception) {
-                            AppDiagnostics.record(this, "render_draft_item", error)
-                            draftHost.addView(text(
-                                "یکی از پیش‌نویس‌ها قابل نمایش نیست؛ اطلاعات آن حفظ شده و برای بررسی علامت‌گذاری شد.",
-                                12, false, Color.rgb(153, 75, 35)
-                            ).apply {
-                                setPadding(dp(12), dp(12), dp(12), dp(12))
-                                background = rounded(Color.rgb(255, 246, 235), 12)
-                            })
+                            AppDiagnostics.record(this, "draft_card_model", error)
+                            null
                         }
+                    }.filter { (mission, meta, _) ->
+                        val matchesText = query.isBlank() || mission.optString("orgName").contains(query, true) ||
+                            mission.optString("date").contains(query, true) || meta.optString("key").contains(query, true)
+                        val matchesFilter = selectedDraftFilter == "all" || meta.optString("category") == selectedDraftFilter
+                        matchesText && matchesFilter
+                    }
+                    resultCount.text = "${faDigits(models.size.toString())} مورد از ${faDigits(drafted.size.toString())} پیش‌نویس"
+                    resultHost.removeAllViews()
+                    filterButtons.forEach { (id, btn) ->
+                        val selected = id == selectedDraftFilter
+                        btn.backgroundTintList = ColorStateList.valueOf(if (selected) navy else Color.WHITE)
+                        btn.setTextColor(if (selected) Color.WHITE else muted)
+                        btn.strokeColor = ColorStateList.valueOf(if (selected) gold else line)
+                    }
+                    if (models.isEmpty()) {
+                        val emptyTitle = when {
+                            drafted.isEmpty() -> "هنوز پیش‌نویسی ندارید"
+                            query.isNotBlank() -> "موردی با این جست‌وجو پیدا نشد"
+                            else -> "در این دسته موردی وجود ندارد"
+                        }
+                        val emptyDetail = if (drafted.isEmpty())
+                            "پاسخ‌های فرم بازرسی پس از ثبت، به‌صورت خودکار و رمزنگاری‌شده ذخیره می‌شوند."
+                        else "فیلتر دیگری را انتخاب کنید یا عبارت جست‌وجو را تغییر دهید."
+                        val empty = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            gravity = Gravity.CENTER
+                            background = rounded(Color.WHITE, 16)
+                            setPadding(dp(18), dp(24), dp(18), dp(24))
+                        }
+                        empty.addView(icon(R.drawable.ic_notes, muted, 32))
+                        empty.addView(text(emptyTitle, 15, true, navy).apply { gravity = Gravity.CENTER; setPadding(0, dp(9), 0, dp(5)) })
+                        empty.addView(text(emptyDetail, 11, false, muted).apply { gravity = Gravity.CENTER })
+                        resultHost.addView(empty)
+                    } else models.forEach { (mission, meta, _) ->
+                        val card = MaterialCardView(this).apply {
+                            radius = dp(17).toFloat()
+                            strokeWidth = dp(1)
+                            strokeColor = line
+                            cardElevation = dp(1).toFloat()
+                            setCardBackgroundColor(Color.WHITE)
+                        }
+                        val body = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(13), dp(13), dp(13), dp(13))
+                        }
+                        val heading = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            layoutDirection = View.LAYOUT_DIRECTION_RTL
+                        }
+                        heading.addView(iconBadge(R.drawable.ic_building, 22), LinearLayout.LayoutParams(dp(43), dp(43)))
+                        val identity = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(9), 0, dp(8), 0)
+                        }
+                        identity.addView(text(mission.optString("orgName", "دستگاه اجرایی"), 13, true, navy).apply {
+                            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                        })
+                        identity.addView(text("کد: ${faDigits(meta.optString("key").take(12))}", 9, false, muted))
+                        identity.addView(text(faDigits(mission.optString("date", "تاریخ ثبت نشده")), 9, false, muted))
+                        heading.addView(identity, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                        val statusColor = when (meta.optString("category")) {
+                            "ready" -> Color.rgb(27, 130, 83)
+                            "attention" -> Color.rgb(164, 91, 43)
+                            else -> navy
+                        }
+                        val statusBg = when (meta.optString("category")) {
+                            "ready" -> Color.rgb(229, 246, 237)
+                            "attention" -> Color.rgb(252, 241, 231)
+                            else -> Color.rgb(238, 242, 248)
+                        }
+                        heading.addView(chip(meta.optString("status"), statusBg, statusColor).apply {
+                            textSize = 8f; maxLines = 2; gravity = Gravity.CENTER
+                            setPadding(dp(7), dp(6), dp(7), dp(6))
+                        })
+                        body.addView(heading)
+
+                        val answered = meta.optInt("answered")
+                        val total = meta.optInt("total")
+                        val percent = if (total > 0) ((answered * 100) / total).coerceIn(0, 100) else 0
+                        val progressRow = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            layoutDirection = View.LAYOUT_DIRECTION_RTL
+                            setPadding(0, dp(12), 0, dp(4))
+                        }
+                        progressRow.addView(text("پیشرفت بازرسی", 10, true, muted), LinearLayout.LayoutParams(0, dp(25), 1f))
+                        progressRow.addView(text("${faDigits(percent.toString())}٪", 11, true, navy))
+                        body.addView(progressRow)
+                        val progress = LinearProgressIndicator(this).apply {
+                            isIndeterminate = false
+                            max = 100
+                            setProgressCompat(percent, false)
+                            trackColor = Color.rgb(235, 239, 244)
+                            setIndicatorColor(if (percent >= 100) Color.rgb(34, 151, 97) else gold)
+                        }
+                        body.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)))
+                        val detail = text(
+                            "${faDigits(answered.toString())} از ${faDigits(total.toString())} شاخص · ${faDigits(meta.optInt("attachments").toString())} مستند · ذخیره ${formatLocalTimestamp(meta.optString("updated"))}",
+                            9, false, muted
+                        ).apply { setPadding(0, dp(7), 0, dp(8)); maxLines = 2 }
+                        body.addView(detail)
+                        if (meta.optInt("unscored") > 0) body.addView(text(
+                            "${faDigits(meta.optInt("unscored").toString())} شاخص بدون امتیاز؛ در مرحله مرور به شما اعلام می‌شود.",
+                            10, false, Color.rgb(153, 98, 34)
+                        ).apply { setPadding(0, 0, 0, dp(6)) })
+                        if (meta.optBoolean("failed")) body.addView(text(
+                            "آخرین تلاش ارسال ناموفق بوده است؛ اطلاعات و امضا حفظ شده‌اند.", 10, true, Color.rgb(164, 76, 48)
+                        ).apply { setPadding(0, 0, 0, dp(7)) })
+
+                        val actions = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            layoutDirection = View.LAYOUT_DIRECTION_RTL
+                        }
+                        val primaryCaption = when {
+                            meta.optBoolean("integrity") -> "جزئیات خطا"
+                            meta.optBoolean("queued") -> "مشاهده صف ارسال"
+                            else -> "ادامه بازرسی"
+                        }
+                        val primary = makeButton(primaryCaption, true) {
+                            when {
+                                meta.optBoolean("integrity") -> {
+                                    val diagnostic = AppDiagnostics.read(this@MainActivity)
+                                    AlertDialog.Builder(this@MainActivity).setTitle("پیش‌نویس فقط‌خواندنی")
+                                        .setMessage("برای حفاظت از اطلاعات رمزنگاری‌شده، ویرایش متوقف شده است.\n\n$diagnostic")
+                                        .setPositiveButton("متوجه شدم", null).show()
+                                }
+                                meta.optBoolean("queued") -> showOutbox()
+                                else -> showMission(mission)
+                            }
+                        }.apply { textSize = 10f; minHeight = dp(43) }
+                        actions.addView(primary, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(3) })
+                        if (meta.optBoolean("queued") && !meta.optBoolean("integrity")) {
+                            val retry = makeButton("تلاش ارسال", false) { showOutbox() }.apply {
+                                textSize = 10f; minHeight = dp(43)
+                            }
+                            actions.addView(retry, LinearLayout.LayoutParams(0, dp(44), 0.72f).apply { marginStart = dp(3) })
+                        }
+                        body.addView(actions)
+                        card.addView(body)
+                        resultHost.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                            bottomMargin = dp(10)
+                        })
                     }
                 }
                 draftSearch.addTextChangedListener(object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                        try { renderDrafts() }
-                        catch (error: Exception) {
-                            AppDiagnostics.record(this@MainActivity, "filter_drafts", error)
-                            showDraftsRecoveryScreen(error)
-                        }
-                    }
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderDraftCards() }
                     override fun afterTextChanged(s: Editable?) {}
                 })
-                renderDrafts()
-                gap(12)
-                label("برای جلوگیری از حذف اطلاعات، داده‌های برنامه را از تنظیمات گوشی پاک نکنید.",12,false,muted)
+                renderDraftCards()
+                gap(8)
+                label("ذخیره خودکار روی دستگاه فعال است. گزارش تا زمان دریافت رسید معتبر سرور، ارسال‌شده محسوب نمی‌شود.", 10, false, muted)
             }
             "account" -> {
                 screen("پروفایل و تنظیمات", "مدیریت حساب و امنیت دستگاه", withNav = true)
@@ -3162,77 +3407,129 @@ class MainActivity : AppCompatActivity() {
         selectedMission = null
         openDraft = null
         activeTab = "outbox"
-        screen("صف ارسال گزارش‌ها", "ارسال کنترل‌شده و قابل پیگیری", withNav = true)
+        screen("ارسال گزارش‌ها", "پیگیری امن، ارسال گروهی و تلاش مجدد", withNav = true)
         val entries = outbox.entries()
         if (entries.isEmpty()) {
-            emptyState("صف ارسال خالی است", "گزارش‌های تأییدشده در این قسمت قرار می‌گیرند.")
-            secondaryButton("بازگشت به خانه") { showHome() }
+            emptyState("صف ارسال خالی است", "گزارش‌های امضاشده پس از تأیید بازرس در این قسمت قرار می‌گیرند.")
+            secondaryButton("بازگشت به پیش‌نویس‌ها") { showHome("drafts") }
             return
         }
-        label("${entries.size} گزارش در انتظار اقدام", 17, true, navy)
-        gap(5)
-        label(if (online()) "اتصال شبکه برقرار است" else "حالت آفلاین؛ برای ارسال به اینترنت نیاز دارید",
-            12, false, if (online()) Color.rgb(24, 121, 80) else Color.rgb(155, 105, 32))
-        gap(12)
-        val batch = makeButton("ارسال همه گزارش‌های امضاشده", true) { sendAllQueued() }
+        val failed = entries.count { it.optString("state") == "failed" || it.optBoolean("integrity_error") }
+        val uploading = entries.count { it.optString("state") == "uploading" }
+        val waiting = entries.size - failed - uploading
+        val summary = MaterialCardView(this).apply {
+            radius = dp(18).toFloat(); strokeWidth = dp(1); strokeColor = line
+            cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+        }
+        val summaryBody = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(15), dp(14), dp(15), dp(14)) }
+        summaryBody.addView(text("وضعیت ارسال گزارش‌ها", 14, true, navy))
+        val summaryRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL; setPadding(0, dp(9), 0, 0) }
+        fun queueMetric(value: Int, caption: String, foreground: Int, background: Int) {
+            val cell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(8), dp(4), dp(8)); setBackground(rounded(background, 11)) }
+            cell.addView(text(faDigits(value.toString()), 19, true, foreground).apply { gravity = Gravity.CENTER })
+            cell.addView(text(caption, 9, true, muted).apply { gravity = Gravity.CENTER })
+            summaryRow.addView(cell, LinearLayout.LayoutParams(0, dp(58), 1f).apply { marginStart = dp(4); marginEnd = dp(4) })
+        }
+        queueMetric(waiting, "در انتظار", navy, Color.rgb(239, 243, 248))
+        queueMetric(uploading, "ارسال ناتمام", Color.rgb(165, 112, 32), Color.rgb(250, 244, 229))
+        queueMetric(failed, "ناموفق / خطا", Color.rgb(165, 76, 48), Color.rgb(252, 239, 234))
+        summaryBody.addView(summaryRow)
+        summary.addView(summaryBody)
+        content.addView(summary)
+        gap(9)
+        label(if (online()) "اتصال شبکه برقرار است؛ رسید نهایی فقط پس از تأیید سرور صادر می‌شود." else "حالت آفلاین؛ گزارش‌ها در حافظه امن باقی می‌مانند و برای ارسال به اینترنت نیاز دارید.",
+            11, false, if (online()) Color.rgb(28, 128, 82) else Color.rgb(155, 105, 32))
+        gap(9)
+        val batch = makeButton("ارسال گروهی گزارش‌های سالم (${entries.count { !it.optBoolean("integrity_error") }})", true) { sendAllQueued() }
         batch.setIconResource(R.drawable.ic_send_all)
         batch.iconTint = ColorStateList.valueOf(Color.WHITE)
+        batch.isEnabled = entries.any { !it.optBoolean("integrity_error") }
         content.addView(batch)
         gap(10)
+
         entries.forEach { item ->
             val key = item.optString("mission_key")
             val mission = item.optJSONObject("mission") ?: JSONObject()
             val state = item.optString("state")
             val integrityError = item.optBoolean("integrity_error")
             val status = when {
-                integrityError -> "خطای بازیابی امن؛ ارسال متوقف شده است"
-                state == "failed" -> "نیازمند تلاش مجدد"
-                state == "uploading" -> "ارسال ناتمام؛ قابل تکرار"
+                integrityError -> "خطای بازیابی امن · ارسال متوقف است"
+                state == "failed" -> "ارسال ناموفق · آماده تلاش مجدد"
+                state == "uploading" -> "ارسال قبلی ناتمام · قابل ادامه با تلاش مجدد"
                 else -> "در انتظار ارسال"
             }
-            val panel = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(Color.WHITE, 16)
-                setPadding(dp(15), dp(16), dp(15), dp(16))
+            val tone = when {
+                integrityError || state == "failed" -> Color.rgb(166, 76, 48)
+                state == "uploading" -> Color.rgb(160, 112, 34)
+                else -> Color.rgb(30, 128, 82)
             }
-            panel.addView(text(item.optString("organization", "دستگاه اجرایی"), 16, true, navy))
-            panel.addView(text(status, 13, true, if (state == "failed") Color.rgb(166, 82, 35) else teal))
-            val unscored = InspectionDraft(key, store).unscoredIds(mission).size
-            if (unscored > 0) panel.addView(text("$unscored بند ارزیابی‌نشده · ادامه ارسال با تأیید امضاشده بازرس", 12, false, Color.rgb(150,96,31)))
-            val attempts = item.optInt("attempts", 0)
-            if (attempts > 0) panel.addView(text("تعداد تلاش‌های ارسال: $attempts", 11, false, muted))
-            if (item.optString("error").isNotBlank()) panel.addView(text("آخرین خطا: ${item.optString("error")}", 11, false, muted))
+            val tint = when {
+                integrityError || state == "failed" -> Color.rgb(252, 240, 234)
+                state == "uploading" -> Color.rgb(250, 244, 229)
+                else -> Color.rgb(231, 246, 238)
+            }
+            val panel = MaterialCardView(this).apply {
+                radius = dp(17).toFloat(); strokeWidth = dp(1); strokeColor = line
+                cardElevation = dp(1).toFloat(); setCardBackgroundColor(Color.WHITE)
+            }
+            val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)) }
+            val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+            header.addView(iconBadge(R.drawable.ic_building, 21), LinearLayout.LayoutParams(dp(42), dp(42)))
+            val identity = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(9), 0, dp(8), 0) }
+            identity.addView(text(item.optString("organization", "دستگاه اجرایی"), 13, true, navy).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            identity.addView(text("کد مأموریت: ${faDigits(key.take(12))}", 9, false, muted))
+            header.addView(identity, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            header.addView(chip(status, tint, tone).apply { textSize = 8f; maxLines = 2; gravity = Gravity.CENTER; setPadding(dp(7), dp(6), dp(7), dp(6)) })
+            body.addView(header)
+
+            val draft = if (key.isNotBlank()) InspectionDraft(key, store) else null
+            if (draft != null && !draft.integrityError && mission.optJSONObject("checklistSnapshot") != null) {
+                val total = mission.optJSONObject("checklistSnapshot")?.optJSONArray("questions")?.length() ?: 0
+                val answered = runCatching { draft.answeredCount(mission) }.getOrDefault(0)
+                val pct = if (total > 0) answered * 100 / total else 0
+                body.addView(text("پیشرفت فرم · ${faDigits(answered.toString())} از ${faDigits(total.toString())} شاخص · ${faDigits(pct.toString())}٪", 10, true, muted).apply { setPadding(0, dp(10), 0, dp(5)) })
+                val progress = LinearProgressIndicator(this).apply { isIndeterminate = false; max = 100; setProgressCompat(pct, false); trackColor = line; setIndicatorColor(gold) }
+                body.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)))
+                val unscored = runCatching { draft.unscoredIds(mission).size }.getOrDefault(0)
+                if (unscored > 0) body.addView(text("${faDigits(unscored.toString())} بند بدون امتیاز · تأیید بازرس ثبت شده یا باید در مرور بررسی شود", 10, false, Color.rgb(150, 96, 31)).apply { setPadding(0, dp(7), 0, 0) })
+            }
+            body.addView(text("تعداد تلاش‌ها: ${faDigits(item.optInt("attempts").toString())} · آخرین وضعیت: ${formatLocalTimestamp(item.optString("updated_at", item.optString("queued_at")))}", 9, false, muted).apply { setPadding(0, dp(8), 0, dp(2)) })
+            if (item.optString("error").isNotBlank()) {
+                body.addView(text("آخرین خطا: ${item.optString("error").take(420)}", 10, false, Color.rgb(150, 76, 50)).apply {
+                    setPadding(dp(9), dp(8), dp(9), dp(8)); background = rounded(Color.rgb(252, 243, 239), 10)
+                })
+            }
             if (integrityError) {
-                panel.addView(text("برای جلوگیری از ارسال ناقص یا حذف داده‌ها، این رکورد فقط‌خواندنی شده است. اطلاعات پیش‌نویس و مستندات حذف نشده‌اند.", 12, true, Color.rgb(150, 96, 31)))
-                panel.addView(makeButton("حذف فقط رکورد خراب از صف", false) {
-                    AlertDialog.Builder(this).setTitle("حذف رکورد خراب")
-                        .setMessage("فقط اطلاعات صف ارسال حذف می‌شود؛ پیش‌نویس و مستندات رمزنگاری‌شده دست‌نخورده می‌مانند. پس از آن، در صورت سالم بودن پیش‌نویس می‌توانید دوباره آن را مرور و امضا کنید.")
+                body.addView(text("این رکورد فقط‌خواندنی است؛ داده‌های رمزنگاری‌شده دست‌نخورده باقی مانده‌اند. برای بازیابی، گزارش فنی را ارسال کنید.", 11, true, Color.rgb(150, 96, 31)).apply { setPadding(0, dp(8), 0, dp(7)) })
+                body.addView(makeButton("ارسال گزارش فنی خطا", false) {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"; putExtra(Intent.EXTRA_SUBJECT, "گزارش خطای صف ارسال سامانه بازرسی")
+                        putExtra(Intent.EXTRA_TEXT, AppDiagnostics.read(this@MainActivity))
+                    }
+                    runCatching { startActivity(Intent.createChooser(send, "ارسال گزارش خطا")) }
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)))
+            } else {
+                val retry = makeButton(if (state == "failed") "تلاش مجدد برای ارسال" else "ارسال اکنون", true) { sendQueued(key) }
+                retry.setIconResource(R.drawable.ic_send); retry.iconTint = ColorStateList.valueOf(Color.WHITE)
+                body.addView(retry, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(45)).apply { topMargin = dp(10) })
+                val edit = makeButton("بازگشت به ویرایش", false) {
+                    AlertDialog.Builder(this).setTitle("بازگشت گزارش به پیش‌نویس")
+                        .setMessage("گزارش از صف خارج می‌شود اما پاسخ‌ها و مستندات رمزنگاری‌شده در دستگاه باقی می‌مانند.")
                         .setNegativeButton("انصراف", null)
-                        .setPositiveButton("حذف رکورد صف") { _, _ -> outbox.remove(key); showOutbox() }
-                        .show()
-                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(10) })
-                content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
-                return@forEach
+                        .setPositiveButton("بازگشت به ویرایش") { _, _ ->
+                            outbox.remove(key)
+                            signatures.clear(key)
+                            showMission(mission)
+                        }.show()
+                }
+                body.addView(edit, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(43)).apply { topMargin = dp(6) })
             }
-            val launch = makeButton("ارسال اکنون", true) { sendQueued(key) }
-            launch.setIconResource(R.drawable.ic_send)
-            launch.iconTint = ColorStateList.valueOf(Color.WHITE)
-            panel.addView(launch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(47)).apply { topMargin = dp(13) })
-            val edit = makeButton("خروج از صف و ویرایش", false) {
-                AlertDialog.Builder(this).setTitle("بازگشت به پیش‌نویس")
-                    .setMessage("گزارش از صف خارج می‌شود اما پاسخ‌ها و مستندات در دستگاه باقی می‌مانند.")
-                    .setNegativeButton("انصراف", null)
-                    .setPositiveButton("بازگشت به ویرایش") { _, _ ->
-                        outbox.remove(key)
-                        signatures.clear(key)
-                        showMission(mission)
-                    }.show()
-            }
-            panel.addView(edit, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(7) })
-            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+            panel.addView(body)
+            content.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
         }
-        label("ارسال گروهی فقط گزارش‌های امضاشده را ارسال می‌کند. بندهای بدون امتیاز تنها پس از تأیید صریح بازرس مجازند.", 12, false, muted)
-        secondaryButton("بازگشت به مأموریت‌ها") { showHome("missions") }
+        gap(5)
+        label("وضعیت ارسال تنها پس از دریافت رسید سرور قطعی است. در خطاهای شبکه، پیش‌نویس، امضا و مستندات در دستگاه حفظ می‌شوند.", 10, false, muted)
+        secondaryButton("بازگشت به پیش‌نویس‌ها") { showHome("drafts") }
     }
 
     private fun sendQueued(key: String, onFinished: ((Boolean) -> Unit)? = null) {
