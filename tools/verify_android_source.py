@@ -112,6 +112,37 @@ if 'DeficiencyWorkflowRules.canInspectorManage(record.optString("source"), recor
 if 'if (!online()) { notifyShort("برای ثبت تغییر وضعیت' not in main_activity:
     errors.append("Status changes must not be committed locally while offline")
 
+# Version 4.18 organizational inbox and background notice delivery.
+notice_files = {
+    "NoticeRules.kt",
+    "NoticeNotificationDispatcher.kt",
+    "NoticePollingScheduler.kt",
+    "NoticePollWorker.kt",
+}
+notice_dir = MAIN / "java" / "ir" / "bazr" / "inspection"
+for filename in sorted(notice_files):
+    if not (notice_dir / filename).is_file():
+        errors.append(f"Missing 4.18 notification module: {filename}")
+if 'implementation("androidx.work:work-runtime-ktx:2.10.0")' not in gradle_file:
+    errors.append("Missing WorkManager dependency for periodic notice polling")
+if "mobile_notice_poll.php" not in (notice_dir / "NoticePollWorker.kt").read_text(encoding="utf-8", errors="replace"):
+    errors.append("Background worker must call the notification-only polling endpoint")
+if "mobile_notices.php" not in main_activity or "mobile_notice_read.php" not in main_activity:
+    errors.append("Inbox must fetch notices and persist per-inspector read receipts")
+if 'Triple("notices", "ابلاغیه‌ها", R.drawable.ic_bell)' not in main_activity:
+    errors.append("Missing dedicated notice inbox item in bottom navigation")
+if "private fun showNotices()" not in main_activity or 'screen("صندوق ابلاغیه‌ها"' not in main_activity:
+    errors.append("Missing native organizational notice inbox")
+if "NoticePollingScheduler.schedule(this)" not in main_activity or "NoticePollingScheduler.cancel(this)" not in main_activity:
+    errors.append("Notification polling lifecycle must be tied to explicit preference/logout")
+if "notification_device_token" not in main_activity:
+    errors.append("Missing encrypted notification-only device credential lifecycle")
+if "POST_NOTIFICATIONS" not in (MAIN / "AndroidManifest.xml").read_text(encoding="utf-8"):
+    errors.append("Android notification permission is missing")
+notice_test = ROOT / "app" / "src" / "test" / "java" / "ir" / "bazr" / "inspection" / "NoticeRulesTest.kt"
+if not notice_test.is_file():
+    errors.append("Missing unit tests for notice deduplication and polling rules")
+
 diagnostics = MAIN / "java" / "ir" / "bazr" / "inspection" / "AppDiagnostics.kt"
 if not diagnostics.is_file():
     errors.append("Missing on-device diagnostics helper: AppDiagnostics.kt")
@@ -120,8 +151,8 @@ if "private fun showDraftsRecoveryScreen" not in main_activity or "AppDiagnostic
 
 
 # Version 4.15 draft workflow and 4.16 checklist assessment regression guards.
-if 'versionName = "4.17.0"' not in gradle_file or 'versionCode = 31' not in gradle_file:
-    errors.append("Expected BAZR Android 4.17.0 / versionCode 31")
+if 'versionName = "4.19.0"' not in gradle_file or 'versionCode = 33' not in gradle_file:
+    errors.append("Expected BAZR Android 4.19.0 / versionCode 33")
 for required in (
     'var renderDraftCards: () -> Unit = {}',
     '"در حال تکمیل"',
@@ -149,6 +180,37 @@ for name in ("login_building.webp", "iran_flag_ribbon.webp"):
     if not (MAIN / "res" / "drawable-nodpi" / name).is_file():
         errors.append(f"Missing required design asset: {name}")
 
+# Version 4.19 evidence archive regression guards.
+evidence_archive = MAIN / "java" / "ir" / "bazr" / "inspection" / "EvidenceArchive.kt"
+evidence_vault = MAIN / "java" / "ir" / "bazr" / "inspection" / "EvidenceVault.kt"
+if not evidence_archive.is_file() or not evidence_vault.is_file():
+    errors.append("Missing 4.19 evidence archive or secure vault")
+else:
+    archive_text = evidence_archive.read_text(encoding="utf-8")
+    vault_text = evidence_vault.read_text(encoding="utf-8")
+    for required in ("encryptedRecordNames(\"draft:\")", "linked_evidence_refs", "EvidenceRefs.references", "integrityError", "EvidenceArchiveRules"):
+        if required not in archive_text:
+            errors.append(f"Evidence archive missing required behavior: {required}")
+    if "metadataDetails(reference: String)" not in vault_text or "created_at" not in vault_text:
+        errors.append("Evidence vault must expose safe metadata and capture timestamps")
+if "mobile_evidence_library.php" not in (MAIN / "java" / "ir" / "bazr" / "inspection" / "ApiClient.kt").read_text(encoding="utf-8"):
+    errors.append("Missing authenticated server evidence-library API client")
+if "private fun showEvidenceLibrary()" not in main_activity or '"evidence" -> showEvidenceLibrary()' not in main_activity:
+    errors.append("Missing native evidence archive screen and navigation route")
+if "مرکز مستندات و تصاویر" not in main_activity:
+    errors.append("Missing evidence archive entry point")
+evidence_test = ROOT / "app" / "src" / "test" / "java" / "ir" / "bazr" / "inspection" / "EvidenceArchiveRulesTest.kt"
+if not evidence_test.is_file():
+    errors.append("Missing evidence archive filter/format unit tests")
+
+paths_xml = (MAIN / "res" / "xml" / "camera_paths.xml").read_text(encoding="utf-8")
+if 'name="evidence_archive" path="evidence_archive/"' not in paths_xml:
+    errors.append("Missing FileProvider cache path for local PDF preview")
+if "downloadInspectorEvidence(uploadId, bearer)" not in main_activity:
+    errors.append("Remote evidence archive must use the authenticated inspector file endpoint")
+if "refreshEvidenceLibrary()" not in main_activity or "api.getEvidenceLibrary(bearer)" not in main_activity:
+    errors.append("Evidence archive must support authenticated server refresh")
+
 if errors:
     print("BAZR source verification FAILED")
     for error in errors:
@@ -163,6 +225,9 @@ print(" - Required login design assets present")
 print(" - 4.15 draft filters, progress and queue guards verified")
 print(" - 4.16 checklist engine, section overview and validation guards verified")
 print(" - 4.17 encrypted deficiency tracking, audit history and ownership checks verified")
+print(" - 4.18 targeted notice inbox, read receipts and background polling guards verified")
+print(" - 4.19 encrypted evidence archive, secure PDF preview and assigned-file API guards verified")
 print(" - Offline status changes are blocked until the finding has a server receipt")
 print(" - Backward-compatible local draft timestamp verified")
 print(" - Duplicate TextInput parent attachment guard enabled")
+
