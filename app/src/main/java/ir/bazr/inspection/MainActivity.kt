@@ -40,6 +40,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.CheckBox
 import android.widget.LinearLayout
+import android.widget.HorizontalScrollView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -3343,6 +3344,8 @@ class MainActivity : AppCompatActivity() {
         var selectedFilter = "all"
         val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
         val filterViews = linkedMapOf<String, TextView>()
+        // Deferred callback: filter chips are wired before the renderer body is assigned.
+        var renderRows: () -> Unit = {}
         filters.forEach { (key, caption) ->
             val chipView = text(caption, 10, true, muted).apply {
                 gravity = Gravity.CENTER; setPadding(dp(10), dp(8), dp(10), dp(8)); background = rounded(Color.WHITE, 18)
@@ -3362,7 +3365,7 @@ class MainActivity : AppCompatActivity() {
         val resultHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(resultHost)
 
-        fun renderRows() {
+        renderRows = {
             filterViews.forEach { (key, view) ->
                 val chosen = key == selectedFilter
                 view.setTextColor(if (chosen) Color.WHITE else muted)

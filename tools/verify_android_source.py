@@ -94,6 +94,14 @@ else:
     for required in ("AWAITING_VERIFICATION", "APPROVED", "REJECTED", "serverStatus", "fromServerStatus", "canTransition", "isOverdue"):
         if required not in rules_text:
             errors.append(f"Deficiency workflow rules missing: {required}")
+# Regression guard for the 4.17.0 filter renderer compile fix.
+if "import android.widget.HorizontalScrollView" not in main_activity:
+    errors.append("Missing HorizontalScrollView import for deficiency filters")
+if "var renderRows: () -> Unit = {}" not in main_activity or "renderRows = {" not in main_activity:
+    errors.append("Deficiency filter renderer must be initialized before callbacks")
+if "fun renderRows()" in main_activity:
+    errors.append("Do not forward-reference the local renderRows function from filter callbacks")
+
 for required in ("private fun showDeficiencies(", "private fun showDeficiencyEditor(", "private fun showDeficiencyDetail(", "private fun syncPendingDeficiencies(", "mobile_finding.php", "ثبت نقص برای این شاخص", "در انتظار اتصال سرور", "پذیرش نسخه آخر سرور", "canManageDeficiency", "همگام‌سازی نقص با سامانه"):
     if required not in main_activity:
         errors.append(f"Missing 4.17 deficiency UI element: {required}")
