@@ -443,20 +443,15 @@ class MainActivity : AppCompatActivity() {
         val baseRight = root.paddingRight
         val baseBottom = root.paddingBottom
         val topScrim = View(this).apply { setBackgroundColor(navy) }
-        // Keep a stable anchor for content that is appended after screen() returns.
-        // The inspection footer must be inserted ABOVE this view so the Android
-        // navigation-bar inset remains reserved below the footer.
-        val bottomScrim = View(this).apply {
-            setBackgroundColor(Color.WHITE)
-            tag = "system_navigation_inset_scrim"
-        }
+        // Keep the system navigation/IME area as ROOT PADDING, not as a child view.
+        // Child views (including the inspection footer) are then always laid out above it.
         root.addView(topScrim, 0, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
-        root.addView(bottomScrim, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
             topScrim.layoutParams = topScrim.layoutParams.apply { height = safe.top }
-            bottomScrim.layoutParams = bottomScrim.layoutParams.apply { height = safe.bottom }
-            root.setPadding(safe.left + baseLeft, baseTop, safe.right + baseRight, baseBottom)
+            val reservedBottom = maxOf(safe.bottom, imeBottom)
+            root.setPadding(safe.left + baseLeft, baseTop, safe.right + baseRight, reservedBottom + baseBottom)
             insets
         }
         WindowInsetsControllerCompat(window, root).apply {
@@ -3617,20 +3612,9 @@ class MainActivity : AppCompatActivity() {
             } else openReview()
         }.apply { textSize = 12f }
         footer.addView(next, LinearLayout.LayoutParams(0, dp(50), 1.15f).apply { marginStart = dp(3) })
-        // screen() installs the bottom system-bar scrim before this footer is built.
-        // Appending normally would place the footer AFTER the scrim, underneath the
-        // Android 3-button/gesture navigation area. Insert both footer views directly
-        // before the scrim, leaving the real navigation inset below them.
-        val bottomInsetScrim = shell.findViewWithTag<View>("system_navigation_inset_scrim")
-        val footerInsertAt = if (bottomInsetScrim != null) {
-            shell.indexOfChild(bottomInsetScrim).coerceAtLeast(0)
-        } else {
-            shell.childCount
-        }
         shell.addView(View(this).apply { setBackgroundColor(line) },
-            footerInsertAt,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-        shell.addView(footer, footerInsertAt + 1, LinearLayout.LayoutParams(
+        shell.addView(footer, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
         ))
     }
