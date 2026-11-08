@@ -1334,6 +1334,40 @@ class MainActivity : AppCompatActivity() {
     private fun missionDraft(mission: JSONObject): Boolean =
         missionKey(mission).let { it.isNotBlank() && store.hasEncryptedRecord("draft:$it") }
 
+    /** Report already stored for this mission (server copy first, then the local receipt copy). */
+    private fun submittedReportFor(key: String): Pair<JSONObject, Boolean>? {
+        if (key.isBlank()) return null
+        val reports = serverSnapshot.optJSONArray("reports") ?: JSONArray()
+        for (i in 0 until reports.length()) {
+            val report = reports.optJSONObject(i) ?: continue
+            if (report.optString("mission_key").trim() == key) return report to true
+        }
+        val local = receiptHistory.find(key)
+        if (local != null && !local.optBoolean("integrity_error") && local.optString("receipt_code").isNotBlank()) {
+            return local to false
+        }
+        // The history copy is optional; the durable server receipt written at send time is enough to lock.
+        val receipt = runCatching { store.loadStrict("receipt:$key")?.let(::JSONObject) }.getOrNull() ?: return null
+        if (receipt.optString("receipt_code").isBlank()) return null
+        return JSONObject().put("mission_key", key).put("receipt_code", receipt.optString("receipt_code"))
+            .put("source", "local_receipt") to false
+    }
+
+    /**
+     * A signed report that the server has receipted is final on the device: it is read-only and
+     * no longer offered as a mission. Only a report the manager explicitly returned stays editable.
+     */
+    private fun isMissionLocked(mission: JSONObject): Boolean {
+        val (report, fromServer) = submittedReportFor(missionKey(mission)) ?: return false
+        return !(fromServer && report.optString("review_status") in setOf("returned", "rejected"))
+    }
+
+    private fun showLockedReport(mission: JSONObject) {
+        val (report, fromServer) = submittedReportFor(missionKey(mission)) ?: return showHome("history")
+        notifyShort("این گزارش ثبت و ارسال شده و قفل است؛ فقط قابل نمایش است")
+        showHistoryDetail(report, fromServer, mission.optString("orgName", "دستگاه اجرایی"))
+    }
+
     private fun reportCount(): Int = (serverSnapshot.optJSONArray("reports") ?: JSONArray()).length()
 
     /** Reading a draft never changes server-owned mission information. */
@@ -1540,6 +1574,7 @@ class MainActivity : AppCompatActivity() {
         activeTab = "calendar"
         val missionsArray = serverSnapshot.optJSONArray("missions") ?: JSONArray()
         val missions = (0 until missionsArray.length()).mapNotNull { missionsArray.optJSONObject(it) }
+            .filterNot { isMissionLocked(it) }
         val dated = missions.filter { MissionScheduleRules.missionDate(it) != null }
         val undated = missions.filter { MissionScheduleRules.missionDate(it) == null }
         var selectedDate = PersianCalendar.today()
@@ -1907,6 +1942,7 @@ class MainActivity : AppCompatActivity() {
         val profileName = profile?.optString("name", "بازرس") ?: "بازرس"
         val missions = serverSnapshot.optJSONArray("missions") ?: JSONArray()
         val all = (0 until missions.length()).mapNotNull { missions.optJSONObject(it) }
+            .filterNot { isMissionLocked(it) }
         val available = all.filter { it.optBoolean("can_execute",false) }
         val drafted = all.filter { missionDraft(it) }
         val queued = outbox.entries()
@@ -3103,6 +3139,7 @@ class MainActivity : AppCompatActivity() {
         activeTab = "mission"
         val key = missionKey(mission)
         if (key.isBlank()) { notifyShort("شناسه مأموریت نامعتبر است"); return }
+        if (isMissionLocked(mission)) { selectedMission = null; openDraft = null; showLockedReport(mission); return }
         if (outbox.get(key) != null) {
             showOutbox()
             notifyShort("این گزارش در صف ارسال است؛ برای ویرایش، ابتدا از صف خارج کنید")
@@ -3611,9 +3648,12 @@ class MainActivity : AppCompatActivity() {
             } else openReview()
         }.apply { textSize = 12f }
         footer.addView(next, LinearLayout.LayoutParams(0, dp(50), 1.15f).apply { marginStart = dp(3) })
+        // applyShellInsets() already appended the white bottom scrim (system navigation bar height).
+        // Insert the footer before it, otherwise the buttons slide under Android's back/home/recents icons.
+        val scrimIndex = (shell.childCount - 1).coerceAtLeast(0)
         shell.addView(View(this).apply { setBackgroundColor(line) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-        shell.addView(footer, LinearLayout.LayoutParams(
+            scrimIndex, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+        shell.addView(footer, scrimIndex + 1, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
         ))
     }
@@ -4725,14 +4765,25 @@ class MainActivity : AppCompatActivity() {
                         }
                         val existingId = saved.optInt("$question:$sha", 0)
                         val fileId = if (existingId > 0) existingId else {
-                            val response = api.uploadEvidence(
-                                session, prepared.bytes, prepared.mime, prepared.name, key, question
+                            fun sendFile(file: PhotoUploadOptimizer.Prepared) = api.uploadEvidence(
+                                session, file.bytes, file.mime, file.name, key, question, draft.startedAt
                             ) { sent, total ->
                                 val completePart = if (total > 0L) (sent * 100L / total).toInt() else 0
                                 updateTransferProgress(scope,
-                                    "مستند $position از $documentCount: ${prepared.name.take(60)}\n" +
+                                    "مستند $position از $documentCount: ${file.name.take(60)}\n" +
                                         "ارسال‌شده از گوشی: ${sent / 1024} از ${total / 1024} کیلوبایت",
                                     ((completedStages * 100) + completePart) / stages)
+                            }
+                            val response = try {
+                                sendFile(prepared)
+                            } catch (rejected: ApiException) {
+                                // Some hosts do not accept WebP: retry once with a JPEG transport copy (<= 200 KB).
+                                val fileTypeRejected = rejected.status in setOf(400, 415, 422) &&
+                                    rejected.error != "invalid_upload_reference"
+                                if (prepared.mime == "image/webp" && fileTypeRejected) {
+                                    val jpeg = PhotoUploadOptimizer.prepare(attachment, PhotoUploadOptimizer.Format.JPEG)
+                                    if (jpeg.mime == "image/jpeg") sendFile(jpeg) else throw rejected
+                                } else throw rejected
                             }
                             val id = response.getInt("file_id")
                             val acceptedQuestion = response.optString("question_key", question)
@@ -4791,6 +4842,7 @@ class MainActivity : AppCompatActivity() {
                 if (e is ApiException && e.error == "invalid_upload_reference") {
                     outbox.forgetUploadedReferences(key)
                 }
+                runCatching { AppDiagnostics.record(this, "send_report:$currentStage", e) }
                 val safeError = "مرحله: $currentStage\n" + AppErrorMessages.forUser(e)
                 outbox.setState(key, "failed", safeError)
                 updateTransferProgress(scope, "ارسال ناموفق؛ داده‌ها و امضا حفظ شدند\n${safeError.take(600)}", 0)

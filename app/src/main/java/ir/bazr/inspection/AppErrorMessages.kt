@@ -51,6 +51,8 @@ object AppErrorMessages {
         is SocketTimeoutException -> "زمان پاسخ‌گویی سرور تمام شد؛ اتصال را بررسی و مجدداً تلاش کنید."
         is UnknownHostException, is ConnectException -> "ارتباط با سرور برقرار نشد؛ اتصال اینترنت را بررسی کنید."
         is SSLException -> "اتصال امن HTTPS برقرار نشد؛ گواهی سرور را بررسی کنید."
-        else -> "عملیات تکمیل نشد؛ اطلاعات ذخیره‌شده حفظ شده‌اند."
+        else -> "عملیات تکمیل نشد؛ اطلاعات ذخیره‌شده حفظ شده‌اند." +
+            "\nجزئیات فنی: ${cause.javaClass.simpleName}" +
+            (cause.message?.take(120)?.let { " · $it" } ?: "")
     }
 }

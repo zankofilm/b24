@@ -179,6 +179,7 @@ class ApiClient(private val base: String) {
     fun uploadEvidence(
         bearer: String, bytes: ByteArray, mime: String, displayName: String,
         mission: String, question: String,
+        startedAt: String = "",
         onProgress: ((Long, Long) -> Unit)? = null,
     ): JSONObject {
         if (bytes.isEmpty() || bytes.size > 12 * 1024 * 1024) throw UserActionException("حجم مستند نامعتبر است")
@@ -202,6 +203,10 @@ class ApiClient(private val base: String) {
             start.write(part("mission_key", mission))
             start.write(part("question_key", question))
             start.write(part("file_kind", if (mime.startsWith("image/")) "image" else "document"))
+            // Same start proof the final submit sends; the server checks the mission window on every upload.
+            if (startedAt.isNotBlank() && startedAt.length <= 64 && startedAt.none { it.isISOControl() }) {
+                start.write(part("started_at", startedAt))
+            }
             start.write(("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\nContent-Type: $mime\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
             val end = "\r\n--$boundary--\r\n".toByteArray()
             conn.setFixedLengthStreamingMode(start.size() + bytes.size + end.size)
