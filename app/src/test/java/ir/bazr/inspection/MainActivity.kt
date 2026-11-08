@@ -442,15 +442,17 @@ class MainActivity : AppCompatActivity() {
         val baseTop = root.paddingTop
         val baseRight = root.paddingRight
         val baseBottom = root.paddingBottom
+        // Keep the status-bar backdrop as the first child. The navigation-bar
+        // inset must be root padding, not a trailing spacer view: screens such
+        // as the inspection form append their fixed footer after screen() returns.
+        // A trailing spacer would therefore sit ABOVE that footer and let the
+        // footer fall underneath Android's navigation controls.
         val topScrim = View(this).apply { setBackgroundColor(navy) }
-        val bottomScrim = View(this).apply { setBackgroundColor(Color.WHITE) }
         root.addView(topScrim, 0, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
-        root.addView(bottomScrim, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             topScrim.layoutParams = topScrim.layoutParams.apply { height = safe.top }
-            bottomScrim.layoutParams = bottomScrim.layoutParams.apply { height = safe.bottom }
-            root.setPadding(safe.left + baseLeft, baseTop, safe.right + baseRight, baseBottom)
+            root.setPadding(safe.left + baseLeft, baseTop, safe.right + baseRight, safe.bottom + baseBottom)
             insets
         }
         WindowInsetsControllerCompat(window, root).apply {
@@ -3611,14 +3613,9 @@ class MainActivity : AppCompatActivity() {
             } else openReview()
         }.apply { textSize = 12f }
         footer.addView(next, LinearLayout.LayoutParams(0, dp(50), 1.15f).apply { marginStart = dp(3) })
-        // Keep the fixed form footer ABOVE the bottom system-inset spacer.
-        // applyShellInsets() inserts that white spacer as the final child; appending
-        // controls after it lets Android's gesture/navigation area cover the buttons.
-        val systemInsetSpacerIndex = (shell.childCount - 1).coerceAtLeast(0)
         shell.addView(View(this).apply { setBackgroundColor(line) },
-            systemInsetSpacerIndex,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-        shell.addView(footer, systemInsetSpacerIndex + 1, LinearLayout.LayoutParams(
+        shell.addView(footer, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(69)
         ))
     }
